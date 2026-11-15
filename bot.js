@@ -30,6 +30,25 @@ const TEXT_ONLY_MODE =
 const AFOO_PRODUCT_NOTICE_MODE =
   (process.env.AFOO_PRODUCT_NOTICE_MODE || "true").toLowerCase() === "true";
 
+// ==========================================
+// HUMAN-LIKE TYPING CONFIGURATION
+// ==========================================
+
+const TYPING_INDICATOR_ENABLED =
+  (process.env.TYPING_INDICATOR_ENABLED || "true").toLowerCase() === "true";
+
+const TYPING_MIN_DELAY =
+  Math.max(0, Number(process.env.TYPING_MIN_DELAY) || 1000);
+
+const TYPING_MAX_DELAY =
+  Math.max(
+    TYPING_MIN_DELAY,
+    Number(process.env.TYPING_MAX_DELAY) || 4500
+  );
+
+const TYPING_CHARS_PER_SECOND =
+  Math.max(1, Number(process.env.TYPING_CHARS_PER_SECOND) || 35);
+
 const AFOO_LUMI_NOTICE =
   process.env.AFOO_LUMI_NOTICE ||
   `Thank you for contacting *${STORE_NAME}*! 😊
@@ -75,6 +94,7 @@ let reconnectTimer = null;
 
 // Compatibility with existing Afoo admin API.
 // QR images are intentionally disabled.
+
 let currentQR = null;
 let qrUpdatedAt = null;
 let qrGenerationError = null;
@@ -118,14 +138,136 @@ function isConnected() {
     connectionStatus === "connected";
 }
 
+// ==========================================
+// HUMAN-LIKE TYPING DELAY
+// ==========================================
+
+function getTypingDelay(message) {
+  const text = String(message || "");
+
+  const calculatedDelay =
+    (text.length / TYPING_CHARS_PER_SECOND) * 1000;
+
+  const baseDelay = Math.max(
+    TYPING_MIN_DELAY,
+    Math.min(calculatedDelay, TYPING_MAX_DELAY)
+  );
+
+  // Add a small random variation.
+  const variation = Math.floor(
+    Math.random() * 500
+  );
+
+  return Math.min(
+    baseDelay + variation,
+    TYPING_MAX_DELAY
+  );
+}
+
+// ==========================================
+// SEND WHATSAPP TEXT WITH TYPING INDICATOR
+// ==========================================
+
 async function sendText(jid, message) {
   if (!isConnected()) {
     throw new Error("WhatsApp is not connected.");
   }
 
-  return sock.sendMessage(jid, {
-    text: String(message || "")
-  });
+  const text = String(message || "");
+
+  if (!text.trim()) {
+    throw new Error("Cannot send an empty WhatsApp message.");
+  }
+
+  const activeSocket = sock;
+
+  let typingStarted = false;
+
+  try {
+    // --------------------------------------
+    // SHOW TYPING INDICATOR
+    // --------------------------------------
+
+    if (TYPING_INDICATOR_ENABLED) {
+      try {
+        await activeSocket.sendPresenceUpdate(
+          "composing",
+          jid
+        );
+
+        typingStarted = true;
+
+        console.log(
+          `${ROBOT_NAME} is typing a response...`
+        );
+
+        // Wait according to response length.
+        await sleep(getTypingDelay(text));
+
+      } catch (presenceError) {
+        // A presence failure should not prevent
+        // the actual customer message from sending.
+
+        console.error(
+          "TYPING INDICATOR ERROR:",
+          presenceError.message
+        );
+      }
+    }
+
+    // --------------------------------------
+    // CHECK CONNECTION AGAIN
+    // --------------------------------------
+
+    if (
+      sock !== activeSocket ||
+      !isConnected()
+    ) {
+      throw new Error(
+        "WhatsApp disconnected while preparing the message."
+      );
+    }
+
+    // --------------------------------------
+    // SEND MESSAGE
+    // --------------------------------------
+
+    const result = await activeSocket.sendMessage(
+      jid,
+      {
+        text
+      }
+    );
+
+    console.log(
+      `${ROBOT_NAME} sent a message successfully.`
+    );
+
+    return result;
+
+  } finally {
+    // --------------------------------------
+    // STOP TYPING INDICATOR
+    // --------------------------------------
+
+    if (
+      TYPING_INDICATOR_ENABLED &&
+      typingStarted
+    ) {
+      try {
+        await activeSocket.sendPresenceUpdate(
+          "paused",
+          jid
+        );
+
+      } catch (presenceError) {
+        console.error(
+          "TYPING INDICATOR STOP ERROR:",
+          presenceError.message
+        );
+      }
+    }
+  }
 }
 
 // ==========================================
@@ -542,6 +684,12 @@ export function getWhatsAppStatus() {
 
     afooProductNoticeMode: AFOO_PRODUCT_NOTICE_MODE,
 
+    typingIndicatorEnabled: TYPING_INDICATOR_ENABLED,
+
+    typingMinDelay: TYPING_MIN_DELAY,
+
+    typingMaxDelay: TYPING_MAX_DELAY,
+
     // Phone-number pairing only.
     qrAvailable: false,
 
@@ -786,6 +934,7 @@ export async function sendWhatsAppNotification(
 ) {
   const jid = toJid(phone);
 
+  // Text notification uses the typing indicator.
   await sendText(jid, message);
 
   let receiptSent = false;
