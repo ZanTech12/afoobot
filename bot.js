@@ -18,6 +18,12 @@ import path from "path";
 const STORE_NAME =
   process.env.STORE_NAME || "Afoo Technology";
 
+const ROBOT_NAME =
+  process.env.ROBOT_NAME || "AFOO-X";
+
+const ROBOT_DESCRIPTION =
+  `${ROBOT_NAME} is the intelligent virtual customer service assistant of ${STORE_NAME}.`;
+
 const TEXT_ONLY_MODE =
   (process.env.TEXT_ONLY_MODE || "true").toLowerCase() === "true";
 
@@ -26,11 +32,14 @@ const AFOO_PRODUCT_NOTICE_MODE =
 
 const AFOO_LUMI_NOTICE =
   process.env.AFOO_LUMI_NOTICE ||
-  `Thank you for contacting *Afoo Technology*! 😊
+  `Thank you for contacting *${STORE_NAME}*! 😊
 
 Our API key has already been connected to the Lumi platform. However, the integration is still being finalised and is expected to be fully established within at least *two working days*.
 
-We appreciate your patience. Our team will be glad to assist you with your phone accessories and replacement-parts enquiries once the integration is complete. 🙏`;
+We appreciate your patience. Our team will be glad to assist you with your phone accessories and replacement-parts enquiries once the integration is complete. 🙏
+
+🤖 *${ROBOT_NAME}*
+_${ROBOT_DESCRIPTION}_`;
 
 const AUTH_FOLDER =
   process.env.AUTH_FOLDER ||
@@ -123,22 +132,236 @@ async function sendText(jid, message) {
 // MESSAGE HELPERS
 // ==========================================
 
-function isGreeting(text) {
-  return /^(hi|hello|hey|good morning|good afternoon|good evening|greetings|menu|start)\b/i
-    .test(String(text || "").trim());
+function normalizeMessage(text) {
+  return String(text || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[.!?,;:]+$/g, "")
+    .replace(/\s+/g, " ");
 }
+
+// ==========================================
+// GREETING DETECTION
+// ==========================================
+
+function isGreeting(text) {
+  const message = normalizeMessage(text);
+
+  const greetings = [
+    /^hi$/,
+    /^hii+$/,
+    /^hello$/,
+    /^helloo+$/,
+    /^hey$/,
+    /^heyy+$/,
+    /^heyyy+$/,
+    /^heya$/,
+    /^hiya$/,
+    /^yo$/,
+    /^sup$/,
+    /^wassup$/,
+    /^what'?s up$/,
+    /^howdy$/,
+    /^good morning$/,
+    /^good afternoon$/,
+    /^good evening$/,
+    /^good day$/,
+    /^morning$/,
+    /^afternoon$/,
+    /^evening$/,
+    /^greetings$/,
+    /^hello there$/,
+    /^hi there$/,
+    /^hey there$/,
+    /^hello friend$/,
+    /^hi friend$/,
+    /^hey friend$/,
+    /^how are you$/,
+    /^how are you doing$/,
+    /^how have you been$/,
+    /^how is it going$/,
+    /^how'?s everything$/,
+    /^how is business$/,
+    /^are you there$/,
+    /^anyone there$/,
+    /^can you hear me$/,
+    /^i am here$/,
+    /^nice to meet you$/,
+    /^pleased to meet you$/,
+    /^good to see you$/,
+    /^welcome$/,
+    /^peace$/,
+    /^start$/,
+    /^start chat$/,
+    /^begin$/,
+    /^let'?s start$/,
+    /^hello afoo$/,
+    /^hi afoo$/,
+    /^hey afoo$/,
+    /^hello afoox$/,
+    /^hi afoox$/,
+    /^hey afoox$/,
+    /^hello afoo-x$/,
+    /^hi afoo-x$/,
+    /^hey afoo-x$/
+  ];
+
+  return greetings.some(pattern => pattern.test(message));
+}
+
+// ==========================================
+// MENU DETECTION
+// ==========================================
+
+function isMenuRequest(text) {
+  const message = normalizeMessage(text);
+
+  return /\b(menu|main menu|show menu|show options|what can you do|your services|list of services|available services|help me|options)\b/i
+    .test(message);
+}
+
+// ==========================================
+// ROBOT IDENTITY DETECTION
+// ==========================================
+
+function isIdentityQuestion(text) {
+  return /\b(who are you|what are you|your name|who am i chatting with|who am i speaking with|are you a robot|are you human|are you an ai|are you automated)\b/i
+    .test(String(text || ""));
+}
+
+// ==========================================
+// PRODUCT ENQUIRY DETECTION
+// ==========================================
 
 function isProductEnquiry(text) {
   return /\b(product|price|cost|available|availability|stock|buy|purchase|order|screen|display|lcd|touch|mouthpiece|charging port|charging flex|battery|phone case|case|charger|accessor(?:y|ies)|replacement|spare part|phone part|samsung|iphone|tecno|infinix|itel|xiaomi|redmi|oppo|vivo|nokia)\b/i
     .test(String(text || ""));
 }
 
+// ==========================================
+// HUMAN SUPPORT DETECTION
+// ==========================================
+
+function isHumanSupportRequest(text) {
+  return /\b(human|agent|staff|representative|customer care|support person|speak to someone|talk to someone|real person|speak with a person|customer service)\b/i
+    .test(String(text || ""));
+}
+
+// ==========================================
+// WELCOME MESSAGE
+// ==========================================
+
 function getWelcome() {
-  return `Welcome to *${STORE_NAME}*! 👋
+  return `👋 Hello and welcome to *${STORE_NAME}*!
 
-We deal in phone accessories and replacement parts, including screens, mouthpieces, charging ports and other phone components.
+🤖 My name is *${ROBOT_NAME}*.
 
-Please tell us what you need and include your phone brand and model where possible.`;
+I am the intelligent virtual customer service assistant of *${STORE_NAME}*, designed to help you with phone accessories, replacement parts, product enquiries and general customer support.
+
+I'm pleased to assist you today!
+
+━━━━━━━━━━━━━━━━━━
+
+📱 *1. PHONE ACCESSORIES*
+
+• Phone cases and screen protectors
+• Chargers and charging cables
+• Batteries and other accessories
+• Phone protection products
+
+🔧 *2. PHONE REPLACEMENT PARTS*
+
+• LCD screens and displays
+• Touchscreens
+• Charging ports and charging flexes
+• Mouthpieces and earpieces
+• Batteries
+• Other replacement components
+
+🛒 *3. PRODUCT ENQUIRIES*
+
+• Product availability
+• Pricing enquiries
+• Orders and purchase assistance
+• Phone brand and model enquiries
+
+👨‍💻 *4. CUSTOMER SUPPORT*
+
+• General enquiries
+• Technical assistance
+• Customer service requests
+• Connecting you with our support team
+
+━━━━━━━━━━━━━━━━━━
+
+💬 *HOW MAY I ASSIST YOU TODAY?*
+
+You can tell me the phone brand, model and the product or service you need.
+
+*Examples:*
+
+_"I need a Samsung A15 screen."_
+
+_"Do you have an iPhone 11 battery?"_
+
+_"I want a Tecno Camon 20 charging port."_
+
+_"I want to speak with customer support."_
+
+You can also type *MENU* anytime to see these options again.
+
+━━━━━━━━━━━━━━━━━━
+
+🤖 *${ROBOT_NAME}*
+_${ROBOT_DESCRIPTION}_
+
+🏢 *${STORE_NAME}*`;
+}
+
+// ==========================================
+// ROBOT IDENTITY RESPONSE
+// ==========================================
+
+function getIdentityResponse() {
+  return `🤖 Hello! I am *${ROBOT_NAME}*.
+
+I am the intelligent virtual customer service assistant of *${STORE_NAME}*.
+
+My responsibilities include:
+
+📱 Helping customers with phone accessories.
+
+🔧 Assisting with replacement-parts enquiries.
+
+🛒 Receiving product and purchase enquiries.
+
+👨‍💻 Directing customers to our customer support team.
+
+💬 Providing general information about our services.
+
+I am an automated assistant, and I am here to make your experience with *${STORE_NAME}* easier and faster.
+
+How may I help you today? 😊`;
+}
+
+// ==========================================
+// CUSTOMER SUPPORT RESPONSE
+// ==========================================
+
+function getSupportResponse() {
+  return `Thank you for reaching *${STORE_NAME}*! 😊
+
+Your request to speak with a member of our customer support team has been received.
+
+Please provide the following information:
+
+1. Your full name.
+2. The phone brand and model, if applicable.
+3. A brief description of what you need.
+
+Our team will be glad to assist you.
+
+🤖 *${ROBOT_NAME}*`;
 }
 
 // ==========================================
@@ -191,7 +414,11 @@ async function handleIncomingMessage(message) {
     if (TEXT_ONLY_MODE) {
       await sendText(
         remoteJid,
-        `Thank you for contacting *${STORE_NAME}*. We currently handle enquiries through text messages only. Please type your enquiry here.`
+        `Thank you for contacting *${STORE_NAME}*. 😊
+
+I am *${ROBOT_NAME}*, your virtual assistant.
+
+We currently handle enquiries through text messages only. Please type your enquiry here so I can assist you.`
       );
     }
 
@@ -206,6 +433,9 @@ async function handleIncomingMessage(message) {
   // LUMI PRODUCT NOTICE
   // ----------------------------------------
 
+  // Keep this before greetings so product
+  // enquiries continue receiving the Lumi notice.
+
   if (
     AFOO_PRODUCT_NOTICE_MODE &&
     isProductEnquiry(normalized)
@@ -219,7 +449,37 @@ async function handleIncomingMessage(message) {
   // ----------------------------------------
 
   if (isGreeting(normalized)) {
-    await sendText(remoteJid, getWelcome());
+    await sendText(
+      remoteJid,
+      getWelcome()
+    );
+
+    return;
+  }
+
+  // ----------------------------------------
+  // CUSTOMER MENU
+  // ----------------------------------------
+
+  if (isMenuRequest(normalized)) {
+    await sendText(
+      remoteJid,
+      getWelcome()
+    );
+
+    return;
+  }
+
+  // ----------------------------------------
+  // ROBOT IDENTITY
+  // ----------------------------------------
+
+  if (isIdentityQuestion(normalized)) {
+    await sendText(
+      remoteJid,
+      getIdentityResponse()
+    );
+
     return;
   }
 
@@ -227,13 +487,10 @@ async function handleIncomingMessage(message) {
   // HUMAN SUPPORT REQUEST
   // ----------------------------------------
 
-  if (
-    /\b(human|agent|staff|representative|customer care|support person)\b/i
-      .test(normalized)
-  ) {
+  if (isHumanSupportRequest(normalized)) {
     await sendText(
       remoteJid,
-      `Thank you for reaching *${STORE_NAME}*. Your request for assistance from our team has been received. Please leave your name and a convenient contact time.`
+      getSupportResponse()
     );
 
     return;
@@ -245,9 +502,25 @@ async function handleIncomingMessage(message) {
 
   await sendText(
     remoteJid,
-    `Thank you for contacting *${STORE_NAME}*. 😊
+    `Thank you for contacting *${STORE_NAME}*! 😊
 
-Please tell us the phone brand/model and the assistance you need. For product availability, prices or replacement-part enquiries, our Lumi integration notice will be shared while setup is being completed.`
+I am *${ROBOT_NAME}*, your virtual customer service assistant.
+
+I'm here to help you with phone accessories, replacement parts and general enquiries.
+
+Please tell me:
+
+📱 Your phone brand.
+📱 Your phone model.
+🔧 The product or assistance you need.
+
+For example:
+_"I need a Samsung A15 screen."_
+
+You can type *MENU* to see our available services or request *CUSTOMER SUPPORT* to speak with our team.
+
+🤖 *${ROBOT_NAME}*
+_${ROBOT_DESCRIPTION}_`
   );
 }
 
@@ -258,17 +531,26 @@ Please tell us the phone brand/model and the assistance you need. For product av
 export function getWhatsAppStatus() {
   return {
     status: connectionStatus,
+
     storeName: STORE_NAME,
 
+    robotName: ROBOT_NAME,
+
+    robotDescription: ROBOT_DESCRIPTION,
+
     textOnlyMode: TEXT_ONLY_MODE,
+
     afooProductNoticeMode: AFOO_PRODUCT_NOTICE_MODE,
 
     // Phone-number pairing only.
     qrAvailable: false,
+
     qrUpdatedAt: null,
+
     qrGenerationError: null,
 
     pairingCode,
+
     pairingRequested,
 
     pairingInProgress: Boolean(
@@ -282,6 +564,7 @@ export function getWhatsAppStatus() {
     qrEventReady,
 
     socketReady: Boolean(sock),
+
     sessionRegistered,
 
     authFolder: AUTH_FOLDER
@@ -313,6 +596,7 @@ async function issuePairingCode() {
     );
 
     connectionStatus = "logged_out";
+
     sessionRegistered = true;
 
     return null;
@@ -331,6 +615,7 @@ async function issuePairingCode() {
 
   try {
     const activeSocket = sock;
+
     const number = pendingPairingNumber;
 
     console.log("----------------------------------");
@@ -354,7 +639,8 @@ async function issuePairingCode() {
       );
     }
 
-    const code = await activeSocket.requestPairingCode(number);
+    const code =
+      await activeSocket.requestPairingCode(number);
 
     if (!code || !String(code).trim()) {
       throw new Error(
@@ -365,7 +651,9 @@ async function issuePairingCode() {
     pairingCode = code;
 
     currentQR = null;
+
     qrUpdatedAt = null;
+
     qrGenerationError = null;
 
     connectionStatus = "pairing_code_ready";
@@ -381,6 +669,7 @@ async function issuePairingCode() {
 
   } catch (error) {
     pairingRequested = false;
+
     pairingCode = null;
 
     console.error(
@@ -434,10 +723,13 @@ export async function requestPairing(phoneNumber) {
   pendingPairingNumber = number;
 
   pairingCode = null;
+
   pairingRequested = false;
 
   currentQR = null;
+
   qrUpdatedAt = null;
+
   qrGenerationError = null;
 
   console.log("----------------------------------");
@@ -475,7 +767,9 @@ export async function sendWhatsAppOTP(
 
 Your *${STORE_NAME}* verification code is: *${otp}*.
 
-Do not share this code with anyone.`;
+Do not share this code with anyone.
+
+🤖 *${ROBOT_NAME}*`;
 
   return sendText(toJid(phone), message);
 }
@@ -505,7 +799,9 @@ export async function sendWhatsAppNotification(
 
     await sock.sendMessage(jid, {
       document: Buffer.from(pdfBuffer),
+
       mimetype: "application/pdf",
+
       fileName
     });
 
@@ -514,6 +810,7 @@ export async function sendWhatsAppNotification(
 
   return {
     success: true,
+
     receiptSent
   };
 }
@@ -532,6 +829,7 @@ export async function startWhatsApp() {
   }
 
   starting = true;
+
   manualClose = false;
 
   qrEventReady = false;
@@ -540,6 +838,7 @@ export async function startWhatsApp() {
 
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
+
     reconnectTimer = null;
   }
 
@@ -603,7 +902,7 @@ export async function startWhatsApp() {
     sock = newSocket;
 
     console.log(
-      "WhatsApp socket created. Waiting for connection updates..."
+      `${ROBOT_NAME} socket created. Waiting for WhatsApp connection updates...`
     );
 
     // --------------------------------------
@@ -656,8 +955,11 @@ export async function startWhatsApp() {
           "WHATSAPP CONNECTION UPDATE:",
           {
             connection,
+
             hasPairingEvent: Boolean(qr),
+
             qrEventReady,
+
             pairingCodeAvailable: Boolean(pairingCode)
           }
         );
@@ -698,7 +1000,7 @@ export async function startWhatsApp() {
           connectionStatus = "connecting";
 
           console.log(
-            "WhatsApp is connecting. Waiting for pairing readiness."
+            `${ROBOT_NAME} is connecting. Waiting for pairing readiness.`
           );
         }
 
@@ -710,12 +1012,15 @@ export async function startWhatsApp() {
           starting = false;
 
           currentQR = null;
+
           qrUpdatedAt = null;
+
           qrGenerationError = null;
 
           pairingCode = null;
 
           pendingPairingNumber = null;
+
           pairingRequested = false;
 
           qrEventReady = false;
@@ -726,11 +1031,16 @@ export async function startWhatsApp() {
 
           if (reconnectTimer) {
             clearTimeout(reconnectTimer);
+
             reconnectTimer = null;
           }
 
           console.log(
             `${STORE_NAME} WhatsApp connected successfully.`
+          );
+
+          console.log(
+            `${ROBOT_NAME} is now online and ready to assist customers.`
           );
 
           console.log(
@@ -756,10 +1066,13 @@ export async function startWhatsApp() {
             statusCode === DisconnectReason.loggedOut;
 
           currentQR = null;
+
           qrUpdatedAt = null;
+
           qrGenerationError = null;
 
           pairingCode = null;
+
           qrEventReady = false;
 
           connectionStatus = loggedOut
@@ -790,6 +1103,7 @@ export async function startWhatsApp() {
             sessionRegistered = false;
 
             pendingPairingNumber = null;
+
             pairingRequested = false;
 
             console.error(
@@ -805,6 +1119,7 @@ export async function startWhatsApp() {
 
           // Keep the pending number so that a new
           // socket can retry after reconnection.
+
           if (pendingPairingNumber) {
             pairingRequested = false;
           }
@@ -814,7 +1129,7 @@ export async function startWhatsApp() {
             !reconnectTimer
           ) {
             console.log(
-              "WhatsApp reconnecting in 5 seconds..."
+              `${ROBOT_NAME} reconnecting in 5 seconds...`
             );
 
             reconnectTimer = setTimeout(() => {
@@ -900,12 +1215,14 @@ export async function stopWhatsApp() {
 
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
+
     reconnectTimer = null;
   }
 
   const activeSocket = sock;
 
   sock = null;
+
   authState = null;
 
   starting = false;
@@ -913,13 +1230,17 @@ export async function stopWhatsApp() {
   connectionStatus = "disconnected";
 
   currentQR = null;
+
   qrUpdatedAt = null;
+
   qrGenerationError = null;
 
   pairingCode = null;
+
   pendingPairingNumber = null;
 
   pairingRequested = false;
+
   qrEventReady = false;
 
   if (activeSocket) {
@@ -937,11 +1258,12 @@ export async function stopWhatsApp() {
   }
 
   console.log(
-    `${STORE_NAME} WhatsApp bot stopped.`
+    `${ROBOT_NAME} - ${STORE_NAME} WhatsApp bot stopped.`
   );
 
   return {
     success: true,
+
     status: connectionStatus
   };
 }
