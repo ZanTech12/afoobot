@@ -31,6 +31,13 @@ const AFOO_PRODUCT_NOTICE_MODE =
   (process.env.AFOO_PRODUCT_NOTICE_MODE || "true").toLowerCase() === "true";
 
 // ==========================================
+// ONLINE PRESENCE CONFIGURATION
+// ==========================================
+
+const ONLINE_PRESENCE_ENABLED =
+  (process.env.ONLINE_PRESENCE_ENABLED || "true").toLowerCase() === "true";
+
+// ==========================================
 // HUMAN-LIKE TYPING CONFIGURATION
 // ==========================================
 
@@ -49,6 +56,10 @@ const TYPING_MAX_DELAY =
 const TYPING_CHARS_PER_SECOND =
   Math.max(1, Number(process.env.TYPING_CHARS_PER_SECOND) || 35);
 
+// ==========================================
+// LUMI INTEGRATION NOTICE
+// ==========================================
+
 const AFOO_LUMI_NOTICE =
   process.env.AFOO_LUMI_NOTICE ||
   `Thank you for contacting *${STORE_NAME}*! 😊
@@ -59,6 +70,10 @@ We appreciate your patience. Our team will be glad to assist you with your phone
 
 🤖 *${ROBOT_NAME}*
 _${ROBOT_DESCRIPTION}_`;
+
+// ==========================================
+// AUTHENTICATION AND LOGGING
+// ==========================================
 
 const AUTH_FOLDER =
   process.env.AUTH_FOLDER ||
@@ -92,14 +107,18 @@ let manualClose = false;
 
 let reconnectTimer = null;
 
-// Compatibility with existing Afoo admin API.
-// QR images are intentionally disabled.
+// QR images intentionally disabled.
 
 let currentQR = null;
 let qrUpdatedAt = null;
 let qrGenerationError = null;
 
+// Prevent duplicate message processing.
 const handledMessages = new Set();
+
+// Lightweight conversational context.
+// This is held in memory and resets when the bot restarts.
+const customerContext = new Map();
 
 // ==========================================
 // GENERAL HELPERS
@@ -138,6 +157,29 @@ function isConnected() {
     connectionStatus === "connected";
 }
 
+function rememberCustomer(remoteJid, details = {}) {
+  const previous = customerContext.get(remoteJid) || {};
+
+  customerContext.set(remoteJid, {
+    ...previous,
+    ...details,
+    lastSeen: Date.now()
+  });
+
+  // Prevent unlimited memory growth.
+  if (customerContext.size > 3000) {
+    const oldestKey = customerContext.keys().next().value;
+
+    if (oldestKey) {
+      customerContext.delete(oldestKey);
+    }
+  }
+}
+
+function getCustomerContext(remoteJid) {
+  return customerContext.get(remoteJid) || {};
+}
+
 // ==========================================
 // HUMAN-LIKE TYPING DELAY
 // ==========================================
@@ -153,7 +195,6 @@ function getTypingDelay(message) {
     Math.min(calculatedDelay, TYPING_MAX_DELAY)
   );
 
-  // Add a small random variation.
   const variation = Math.floor(
     Math.random() * 500
   );
@@ -184,9 +225,7 @@ async function sendText(jid, message) {
   let typingStarted = false;
 
   try {
-    // --------------------------------------
     // SHOW TYPING INDICATOR
-    // --------------------------------------
 
     if (TYPING_INDICATOR_ENABLED) {
       try {
@@ -201,13 +240,9 @@ async function sendText(jid, message) {
           `${ROBOT_NAME} is typing a response...`
         );
 
-        // Wait according to response length.
         await sleep(getTypingDelay(text));
 
       } catch (presenceError) {
-        // A presence failure should not prevent
-        // the actual customer message from sending.
-
         console.error(
           "TYPING INDICATOR ERROR:",
           presenceError.message
@@ -215,9 +250,7 @@ async function sendText(jid, message) {
       }
     }
 
-    // --------------------------------------
-    // CHECK CONNECTION AGAIN
-    // --------------------------------------
+    // VERIFY CONNECTION
 
     if (
       sock !== activeSocket ||
@@ -228,15 +261,11 @@ async function sendText(jid, message) {
       );
     }
 
-    // --------------------------------------
     // SEND MESSAGE
-    // --------------------------------------
 
     const result = await activeSocket.sendMessage(
       jid,
-      {
-        text
-      }
+      { text }
     );
 
     console.log(
@@ -246,9 +275,7 @@ async function sendText(jid, message) {
     return result;
 
   } finally {
-    // --------------------------------------
     // STOP TYPING INDICATOR
-    // --------------------------------------
 
     if (
       TYPING_INDICATOR_ENABLED &&
@@ -271,7 +298,7 @@ async function sendText(jid, message) {
 }
 
 // ==========================================
-// MESSAGE HELPERS
+// MESSAGE NORMALIZATION
 // ==========================================
 
 function normalizeMessage(text) {
@@ -363,7 +390,19 @@ function isMenuRequest(text) {
 }
 
 // ==========================================
-// ROBOT IDENTITY DETECTION
+// MENU NUMBER DETECTION
+// ==========================================
+
+function getMenuSelection(text) {
+  const message = normalizeMessage(text);
+
+  const match = message.match(/^(?:option\s*)?([1-6])$/);
+
+  return match ? Number(match[1]) : null;
+}
+
+// ==========================================
+// IDENTITY DETECTION
 // ==========================================
 
 function isIdentityQuestion(text) {
@@ -376,16 +415,88 @@ function isIdentityQuestion(text) {
 // ==========================================
 
 function isProductEnquiry(text) {
-  return /\b(product|price|cost|available|availability|stock|buy|purchase|order|screen|display|lcd|touch|mouthpiece|charging port|charging flex|battery|phone case|case|charger|accessor(?:y|ies)|replacement|spare part|phone part|samsung|iphone|tecno|infinix|itel|xiaomi|redmi|oppo|vivo|nokia)\b/i
+  return /\b(product|price|prices|cost|available|availability|stock|buy|purchase|order|screen|display|lcd|touch|mouthpiece|charging port|charging flex|battery|phone case|case|charger|accessor(?:y|ies)|replacement|spare part|phone part|samsung|iphone|tecno|infinix|itel|xiaomi|redmi|oppo|vivo|nokia)\b/i
     .test(String(text || ""));
 }
 
 // ==========================================
-// HUMAN SUPPORT DETECTION
+// CUSTOMER SUPPORT DETECTION
 // ==========================================
 
 function isHumanSupportRequest(text) {
-  return /\b(human|agent|staff|representative|customer care|support person|speak to someone|talk to someone|real person|speak with a person|customer service)\b/i
+  return /\b(human|agent|staff|representative|customer care|support person|speak to someone|talk to someone|real person|speak with a person|customer service|human support)\b/i
+    .test(String(text || ""));
+}
+
+// ==========================================
+// THANK YOU DETECTION
+// ==========================================
+
+function isThankYou(text) {
+  return /\b(thank you|thanks|thank u|thx|i appreciate|much appreciated|thanks a lot)\b/i
+    .test(String(text || ""));
+}
+
+// ==========================================
+// GOODBYE DETECTION
+// ==========================================
+
+function isGoodbye(text) {
+  return /\b(bye|goodbye|see you|talk to you later|i am leaving|have a nice day|good night)\b/i
+    .test(String(text || ""));
+}
+
+// ==========================================
+// DELIVERY DETECTION
+// ==========================================
+
+function isDeliveryQuestion(text) {
+  return /\b(delivery|deliver|shipping|dispatch|dispatching|courier|waybill|send to me|transport|how long.*arrive|when.*arrive)\b/i
+    .test(String(text || ""));
+}
+
+// ==========================================
+// PAYMENT DETECTION
+// ==========================================
+
+function isPaymentQuestion(text) {
+  return /\b(payment|pay|transfer|bank transfer|account number|pos|deposit|payment method|how can i pay|where can i pay)\b/i
+    .test(String(text || ""));
+}
+
+// ==========================================
+// LOCATION DETECTION
+// ==========================================
+
+function isLocationQuestion(text) {
+  return /\b(address|location|where are you|where is your shop|shop address|office address|physical address|directions|how do i locate you)\b/i
+    .test(String(text || ""));
+}
+
+// ==========================================
+// ORDER STATUS DETECTION
+// ==========================================
+
+function isOrderStatusQuestion(text) {
+  return /\b(order status|track my order|tracking|my order|order number|has my order|where is my order|order confirmation)\b/i
+    .test(String(text || ""));
+}
+
+// ==========================================
+// COMPLAINT DETECTION
+// ==========================================
+
+function isComplaint(text) {
+  return /\b(complain|complaint|not working|does not work|faulty|damaged|wrong item|refund|return|bad service|problem with|issue with|disappointed|unsatisfied)\b/i
+    .test(String(text || ""));
+}
+
+// ==========================================
+// PHONE MODEL DETECTION
+// ==========================================
+
+function containsPhoneModel(text) {
+  return /\b(samsung|iphone|tecno|infinix|itel|xiaomi|redmi|oppo|vivo|nokia|pixel|oneplus|huawei)\b/i
     .test(String(text || ""));
 }
 
@@ -398,7 +509,7 @@ function getWelcome() {
 
 🤖 My name is *${ROBOT_NAME}*.
 
-I am the intelligent virtual customer service assistant of *${STORE_NAME}*, designed to help you with phone accessories, replacement parts, product enquiries and general customer support.
+I am your intelligent virtual customer service assistant. I can help you with phone accessories, replacement parts, product enquiries and general customer support.
 
 I'm pleased to assist you today!
 
@@ -427,18 +538,30 @@ I'm pleased to assist you today!
 • Orders and purchase assistance
 • Phone brand and model enquiries
 
-👨‍💻 *4. CUSTOMER SUPPORT*
+🚚 *4. DELIVERY ENQUIRIES*
+
+• Delivery arrangements
+• Dispatch information
+• Shipping questions
+
+💳 *5. PAYMENT ENQUIRIES*
+
+• Payment assistance
+• Payment confirmation
+• General payment questions
+
+👨‍💻 *6. CUSTOMER SUPPORT*
 
 • General enquiries
-• Technical assistance
-• Customer service requests
+• Complaints and assistance
+• Technical support requests
 • Connecting you with our support team
 
 ━━━━━━━━━━━━━━━━━━
 
 💬 *HOW MAY I ASSIST YOU TODAY?*
 
-You can tell me the phone brand, model and the product or service you need.
+You can type a menu number or describe what you need.
 
 *Examples:*
 
@@ -448,9 +571,11 @@ _"Do you have an iPhone 11 battery?"_
 
 _"I want a Tecno Camon 20 charging port."_
 
+_"How can I make payment?"_
+
 _"I want to speak with customer support."_
 
-You can also type *MENU* anytime to see these options again.
+You can type *MENU* anytime to see these options again.
 
 ━━━━━━━━━━━━━━━━━━
 
@@ -461,7 +586,7 @@ _${ROBOT_DESCRIPTION}_
 }
 
 // ==========================================
-// ROBOT IDENTITY RESPONSE
+// IDENTITY RESPONSE
 // ==========================================
 
 function getIdentityResponse() {
@@ -469,21 +594,25 @@ function getIdentityResponse() {
 
 I am the intelligent virtual customer service assistant of *${STORE_NAME}*.
 
-My responsibilities include:
+I can help you with:
 
-📱 Helping customers with phone accessories.
+📱 Phone accessories.
 
-🔧 Assisting with replacement-parts enquiries.
+🔧 Phone replacement parts.
 
-🛒 Receiving product and purchase enquiries.
+🛒 Product and purchase enquiries.
 
-👨‍💻 Directing customers to our customer support team.
+🚚 Delivery enquiries.
 
-💬 Providing general information about our services.
+💳 Payment assistance.
 
-I am an automated assistant, and I am here to make your experience with *${STORE_NAME}* easier and faster.
+👨‍💻 Customer support requests.
 
-How may I help you today? 😊`;
+I am an automated assistant designed to make your experience with *${STORE_NAME}* easier and faster.
+
+How may I help you today? 😊
+
+You can type *MENU* to explore my services.`;
 }
 
 // ==========================================
@@ -495,15 +624,339 @@ function getSupportResponse() {
 
 Your request to speak with a member of our customer support team has been received.
 
-Please provide the following information:
+To help our team assist you faster, please provide:
 
 1. Your full name.
-2. The phone brand and model, if applicable.
-3. A brief description of what you need.
+2. Your phone number, if different from this WhatsApp number.
+3. The phone brand and model, if applicable.
+4. A brief description of what you need.
 
 Our team will be glad to assist you.
 
 🤖 *${ROBOT_NAME}*`;
+}
+
+// ==========================================
+// MENU SELECTION RESPONSE
+// ==========================================
+
+function getMenuSelectionResponse(selection) {
+  switch (selection) {
+    case 1:
+      return `📱 *PHONE ACCESSORIES*
+
+I can help you with enquiries about:
+
+• Phone cases
+• Screen protectors
+• Chargers and cables
+• Batteries
+• Other phone accessories
+
+Please tell me your phone brand and model, together with the accessory you need.
+
+💡 *Suggestion:* For example, "I need a screen protector for Samsung A15."`;
+
+    case 2:
+      return `🔧 *PHONE REPLACEMENT PARTS*
+
+We handle enquiries about:
+
+• LCD screens and displays
+• Touchscreens
+• Charging ports
+• Charging flexes
+• Batteries
+• Earpieces and mouthpieces
+
+Please provide your phone brand, exact model and the replacement part you need.
+
+💡 *Suggestion:* "I need an iPhone 11 charging port."`;
+
+    case 3:
+      return `🛒 *PRODUCT ENQUIRIES*
+
+Please tell me:
+
+1. Your phone brand.
+2. Your exact phone model.
+3. The product or replacement part you need.
+
+Our product integration is currently being finalised through Lumi. I can provide the relevant service notice and help direct your enquiry.
+
+💡 *Suggestion:* Send the exact phone model so your enquiry is clearer.`;
+
+    case 4:
+      return `🚚 *DELIVERY ENQUIRIES*
+
+I can help you direct your delivery enquiry.
+
+Please provide:
+
+1. Your location or delivery destination.
+2. The item you want to purchase.
+3. Whether you have already placed an order.
+
+Our team can assist with delivery arrangements and confirmation.
+
+💡 *Suggestion:* Include your town or state when asking about delivery.`;
+
+    case 5:
+      return `💳 *PAYMENT ENQUIRIES*
+
+For payment assistance, please tell me:
+
+1. Whether you are making a new purchase.
+2. Whether you have already made a payment.
+3. Whether you need payment confirmation or assistance.
+
+For security, do not send your bank PIN, card PIN or password here.
+
+Our support team can help with verified payment instructions.`;
+
+    case 6:
+      return getSupportResponse();
+
+    default:
+      return getWelcome();
+  }
+}
+
+// ==========================================
+// SMART RESPONSE HELPERS
+// ==========================================
+
+function getThankYouResponse() {
+  return `You're very welcome! 😊
+
+Thank you for choosing *${STORE_NAME}*.
+
+I'm always happy to assist you.
+
+Would you like help with anything else?
+
+💡 You can ask me about:
+• Phone accessories
+• Replacement parts
+• Delivery enquiries
+• Payment assistance
+• Customer support
+
+Type *MENU* to explore more options.
+
+🤖 *${ROBOT_NAME}*`;
+}
+
+function getGoodbyeResponse() {
+  return `Thank you for contacting *${STORE_NAME}*! 😊
+
+It was a pleasure assisting you.
+
+Whenever you need phone accessories, replacement parts or customer support, feel free to message us again.
+
+Have a wonderful day!
+
+🤖 *${ROBOT_NAME}*`;
+}
+
+function getDeliveryResponse() {
+  return `🚚 *DELIVERY ASSISTANCE*
+
+Thank you for your delivery enquiry.
+
+To help direct your request, please provide:
+
+1. Your town or city.
+2. Your state.
+3. The product you are interested in.
+4. Whether you have already placed an order.
+
+Our team will assist you with the available delivery arrangements.
+
+💡 *Helpful suggestion:* Include your delivery destination so the team can respond more accurately.
+
+🤖 *${ROBOT_NAME}*`;
+}
+
+function getPaymentResponse() {
+  return `💳 *PAYMENT ASSISTANCE*
+
+Thank you for your payment enquiry.
+
+Please let me know which assistance you need:
+
+1. Payment instructions for a new order.
+2. Payment confirmation.
+3. Assistance with a failed transfer.
+4. Help with an existing transaction.
+
+Please do not share your PIN, password or full card details.
+
+Our team can help verify payment-related enquiries.
+
+🤖 *${ROBOT_NAME}*`;
+}
+
+function getLocationResponse() {
+  return `📍 *LOCATION ENQUIRY*
+
+Thank you for your interest in *${STORE_NAME}*.
+
+Please tell me your current town or state so I can help direct your enquiry to our team.
+
+I don't want to give you an unverified address or directions.
+
+💡 *Suggestion:* You can also tell me whether you need our shop location or delivery information.
+
+🤖 *${ROBOT_NAME}*`;
+}
+
+function getOrderStatusResponse() {
+  return `🛒 *ORDER STATUS ASSISTANCE*
+
+I can help direct your order enquiry.
+
+Please provide:
+
+1. Your order number, if available.
+2. The name used when placing the order.
+3. The date you placed the order.
+4. A short description of the item.
+
+Please avoid sending sensitive banking information.
+
+Our customer support team can assist with checking your order.
+
+🤖 *${ROBOT_NAME}*`;
+}
+
+function getComplaintResponse() {
+  return `🙏 *CUSTOMER COMPLAINTS AND ASSISTANCE*
+
+We are sorry to hear that you are experiencing a problem.
+
+At *${STORE_NAME}*, we value your feedback and want to help resolve your concern.
+
+Please provide:
+
+1. Your full name.
+2. Your order number, if available.
+3. The product or service involved.
+4. A clear description of the problem.
+5. When the issue occurred.
+
+Our customer support team can review your complaint and assist you.
+
+Thank you for giving us the opportunity to help.
+
+🤖 *${ROBOT_NAME}*`;
+}
+
+// ==========================================
+// SMART DEFAULT RESPONSE
+// ==========================================
+
+function getSmartDefaultResponse(text, remoteJid) {
+  const previous = getCustomerContext(remoteJid);
+
+  if (
+    /^(yes|yeah|yep|sure|okay|ok|please|continue|go ahead)$/i
+      .test(normalizeMessage(text)) &&
+    previous.lastTopic === "support"
+  ) {
+    return `Thank you. 😊
+
+Please describe the issue you need help with, and include your phone model or order number if applicable.
+
+🤖 *${ROBOT_NAME}*`;
+  }
+
+  if (
+    /^(more|tell me more|explain more|details|more details)$/i
+      .test(normalizeMessage(text))
+  ) {
+    return `Of course! 😊
+
+I can help you explore the following services:
+
+📱 Phone accessories.
+
+🔧 Phone replacement parts.
+
+🛒 Product enquiries.
+
+🚚 Delivery enquiries.
+
+💳 Payment assistance.
+
+👨‍💻 Customer support.
+
+Please tell me which one you would like to know more about.
+
+You can also type *MENU* to see all options.
+
+🤖 *${ROBOT_NAME}*`;
+  }
+
+  if (containsPhoneModel(text)) {
+    return `Thank you for sharing your phone details. 😊
+
+I can help direct your enquiry.
+
+Please tell me the exact product or replacement part you need.
+
+For example:
+
+• LCD screen
+• Battery
+• Charging port
+• Touchscreen
+• Phone case
+• Charger
+
+💡 *Suggestion:* Include the complete phone model to help avoid confusion.
+
+🤖 *${ROBOT_NAME}*`;
+  }
+
+  return `Thank you for contacting *${STORE_NAME}*! 😊
+
+I am *${ROBOT_NAME}*, your virtual customer service assistant.
+
+I would be happy to help you.
+
+You can ask me about:
+
+📱 Phone accessories.
+
+🔧 Replacement parts.
+
+🛒 Product enquiries.
+
+🚚 Delivery assistance.
+
+💳 Payment enquiries.
+
+👨‍💻 Customer support.
+
+💡 *To help me understand you better:*
+
+Please describe what you need, including your phone brand and model if your enquiry concerns a phone.
+
+*Examples:*
+
+_"I need a Samsung A15 screen."_
+
+_"How do I make payment?"_
+
+_"Can you deliver to Lagos?"_
+
+_"I want to speak with customer support."_
+
+You can type *MENU* to see all available services.
+
+🤖 *${ROBOT_NAME}*
+_${ROBOT_DESCRIPTION}_`;
 }
 
 // ==========================================
@@ -560,7 +1013,11 @@ async function handleIncomingMessage(message) {
 
 I am *${ROBOT_NAME}*, your virtual assistant.
 
-We currently handle enquiries through text messages only. Please type your enquiry here so I can assist you.`
+We currently handle enquiries through text messages only.
+
+Please type your enquiry here so I can assist you.
+
+💡 You can type *MENU* to explore our services.`
       );
     }
 
@@ -571,26 +1028,41 @@ We currently handle enquiries through text messages only. Please type your enqui
     `Message received from ${remoteJid}: ${normalized}`
   );
 
-  // ----------------------------------------
-  // LUMI PRODUCT NOTICE
-  // ----------------------------------------
+  rememberCustomer(remoteJid, {
+    lastMessage: normalized
+  });
 
-  // Keep this before greetings so product
-  // enquiries continue receiving the Lumi notice.
+  // ========================================
+  // LUMI PRODUCT NOTICE
+  // ========================================
+
+  // Preserve the original product notice priority.
 
   if (
     AFOO_PRODUCT_NOTICE_MODE &&
     isProductEnquiry(normalized)
   ) {
-    await sendText(remoteJid, AFOO_LUMI_NOTICE);
+    rememberCustomer(remoteJid, {
+      lastTopic: "product"
+    });
+
+    await sendText(
+      remoteJid,
+      AFOO_LUMI_NOTICE
+    );
+
     return;
   }
 
-  // ----------------------------------------
+  // ========================================
   // GREETINGS
-  // ----------------------------------------
+  // ========================================
 
   if (isGreeting(normalized)) {
+    rememberCustomer(remoteJid, {
+      lastTopic: "greeting"
+    });
+
     await sendText(
       remoteJid,
       getWelcome()
@@ -599,11 +1071,15 @@ We currently handle enquiries through text messages only. Please type your enqui
     return;
   }
 
-  // ----------------------------------------
-  // CUSTOMER MENU
-  // ----------------------------------------
+  // ========================================
+  // MENU REQUEST
+  // ========================================
 
   if (isMenuRequest(normalized)) {
+    rememberCustomer(remoteJid, {
+      lastTopic: "menu"
+    });
+
     await sendText(
       remoteJid,
       getWelcome()
@@ -612,9 +1088,37 @@ We currently handle enquiries through text messages only. Please type your enqui
     return;
   }
 
-  // ----------------------------------------
+  // ========================================
+  // MENU NUMBER SELECTION
+  // ========================================
+
+  const selection = getMenuSelection(normalized);
+
+  if (selection !== null) {
+    const topics = {
+      1: "accessories",
+      2: "replacement-parts",
+      3: "product",
+      4: "delivery",
+      5: "payment",
+      6: "support"
+    };
+
+    rememberCustomer(remoteJid, {
+      lastTopic: topics[selection]
+    });
+
+    await sendText(
+      remoteJid,
+      getMenuSelectionResponse(selection)
+    );
+
+    return;
+  }
+
+  // ========================================
   // ROBOT IDENTITY
-  // ----------------------------------------
+  // ========================================
 
   if (isIdentityQuestion(normalized)) {
     await sendText(
@@ -625,11 +1129,15 @@ We currently handle enquiries through text messages only. Please type your enqui
     return;
   }
 
-  // ----------------------------------------
-  // HUMAN SUPPORT REQUEST
-  // ----------------------------------------
+  // ========================================
+  // HUMAN SUPPORT
+  // ========================================
 
   if (isHumanSupportRequest(normalized)) {
+    rememberCustomer(remoteJid, {
+      lastTopic: "support"
+    });
+
     await sendText(
       remoteJid,
       getSupportResponse()
@@ -638,31 +1146,127 @@ We currently handle enquiries through text messages only. Please type your enqui
     return;
   }
 
-  // ----------------------------------------
-  // DEFAULT RESPONSE
-  // ----------------------------------------
+  // ========================================
+  // COMPLAINTS
+  // ========================================
+
+  if (isComplaint(normalized)) {
+    rememberCustomer(remoteJid, {
+      lastTopic: "complaint"
+    });
+
+    await sendText(
+      remoteJid,
+      getComplaintResponse()
+    );
+
+    return;
+  }
+
+  // ========================================
+  // ORDER STATUS
+  // ========================================
+
+  if (isOrderStatusQuestion(normalized)) {
+    rememberCustomer(remoteJid, {
+      lastTopic: "order"
+    });
+
+    await sendText(
+      remoteJid,
+      getOrderStatusResponse()
+    );
+
+    return;
+  }
+
+  // ========================================
+  // DELIVERY
+  // ========================================
+
+  if (isDeliveryQuestion(normalized)) {
+    rememberCustomer(remoteJid, {
+      lastTopic: "delivery"
+    });
+
+    await sendText(
+      remoteJid,
+      getDeliveryResponse()
+    );
+
+    return;
+  }
+
+  // ========================================
+  // PAYMENT
+  // ========================================
+
+  if (isPaymentQuestion(normalized)) {
+    rememberCustomer(remoteJid, {
+      lastTopic: "payment"
+    });
+
+    await sendText(
+      remoteJid,
+      getPaymentResponse()
+    );
+
+    return;
+  }
+
+  // ========================================
+  // LOCATION
+  // ========================================
+
+  if (isLocationQuestion(normalized)) {
+    rememberCustomer(remoteJid, {
+      lastTopic: "location"
+    });
+
+    await sendText(
+      remoteJid,
+      getLocationResponse()
+    );
+
+    return;
+  }
+
+  // ========================================
+  // THANK YOU
+  // ========================================
+
+  if (isThankYou(normalized)) {
+    await sendText(
+      remoteJid,
+      getThankYouResponse()
+    );
+
+    return;
+  }
+
+  // ========================================
+  // GOODBYE
+  // ========================================
+
+  if (isGoodbye(normalized)) {
+    await sendText(
+      remoteJid,
+      getGoodbyeResponse()
+    );
+
+    return;
+  }
+
+  // ========================================
+  // SMART DEFAULT RESPONSE
+  // ========================================
 
   await sendText(
     remoteJid,
-    `Thank you for contacting *${STORE_NAME}*! 😊
-
-I am *${ROBOT_NAME}*, your virtual customer service assistant.
-
-I'm here to help you with phone accessories, replacement parts and general enquiries.
-
-Please tell me:
-
-📱 Your phone brand.
-📱 Your phone model.
-🔧 The product or assistance you need.
-
-For example:
-_"I need a Samsung A15 screen."_
-
-You can type *MENU* to see our available services or request *CUSTOMER SUPPORT* to speak with our team.
-
-🤖 *${ROBOT_NAME}*
-_${ROBOT_DESCRIPTION}_`
+    getSmartDefaultResponse(
+      normalized,
+      remoteJid
+    )
   );
 }
 
@@ -690,7 +1294,8 @@ export function getWhatsAppStatus() {
 
     typingMaxDelay: TYPING_MAX_DELAY,
 
-    // Phone-number pairing only.
+    onlinePresenceEnabled: ONLINE_PRESENCE_ENABLED,
+
     qrAvailable: false,
 
     qrUpdatedAt: null,
@@ -758,7 +1363,6 @@ async function issuePairingCode() {
     return null;
   }
 
-  // Prevent duplicate requests.
   pairingRequested = true;
 
   try {
@@ -772,7 +1376,6 @@ async function issuePairingCode() {
     console.log("Requesting WhatsApp pairing code.");
     console.log("Phone:", number);
 
-    // Follow Divine's working pairing delay.
     await sleep(1500);
 
     if (
@@ -934,7 +1537,6 @@ export async function sendWhatsAppNotification(
 ) {
   const jid = toJid(phone);
 
-  // Text notification uses the typing indicator.
   await sendText(jid, message);
 
   let receiptSent = false;
@@ -992,17 +1594,13 @@ export async function startWhatsApp() {
   }
 
   try {
-    // --------------------------------------
     // AUTHENTICATION FOLDER
-    // --------------------------------------
 
     fs.mkdirSync(AUTH_FOLDER, {
       recursive: true
     });
 
-    // --------------------------------------
     // LOAD AUTHENTICATION
-    // --------------------------------------
 
     const {
       state,
@@ -1025,10 +1623,9 @@ export async function startWhatsApp() {
       );
     }
 
-    // --------------------------------------
     // CREATE WHATSAPP SOCKET
-    // Divine Solar Hub configuration
-    // --------------------------------------
+    // Keep this configuration compatible with
+    // the working Baileys 6.7.24 pairing setup.
 
     const newSocket = makeWASocket({
       auth: state,
@@ -1037,7 +1634,7 @@ export async function startWhatsApp() {
 
       printQRInTerminal: false,
 
-      markOnlineOnConnect: false,
+      markOnlineOnConnect: ONLINE_PRESENCE_ENABLED,
 
       syncFullHistory: false,
 
@@ -1054,9 +1651,7 @@ export async function startWhatsApp() {
       `${ROBOT_NAME} socket created. Waiting for WhatsApp connection updates...`
     );
 
-    // --------------------------------------
     // SAVE AUTHENTICATION CREDENTIALS
-    // --------------------------------------
 
     newSocket.ev.on(
       "creds.update",
@@ -1083,9 +1678,7 @@ export async function startWhatsApp() {
       }
     );
 
-    // --------------------------------------
     // CONNECTION UPDATES
-    // --------------------------------------
 
     newSocket.ev.on(
       "connection.update",
@@ -1113,19 +1706,11 @@ export async function startWhatsApp() {
           }
         );
 
-        // ----------------------------------
         // PAIRING READINESS EVENT
-        // ----------------------------------
 
         if (qr) {
-          // This event is used only to know that
-          // Baileys is ready for phone-number pairing.
-          //
-          // No QR image is generated.
-          // No QR code is displayed.
-          //
-          // Phone-number pairing remains the
-          // only supported linking method.
+          // QR is not displayed or generated.
+          // This event only signals pairing readiness.
 
           qrEventReady = true;
 
@@ -1141,9 +1726,7 @@ export async function startWhatsApp() {
           }
         }
 
-        // ----------------------------------
         // CONNECTING
-        // ----------------------------------
 
         if (connection === "connecting") {
           connectionStatus = "connecting";
@@ -1153,9 +1736,7 @@ export async function startWhatsApp() {
           );
         }
 
-        // ----------------------------------
         // CONNECTED
-        // ----------------------------------
 
         if (connection === "open") {
           starting = false;
@@ -1196,11 +1777,27 @@ export async function startWhatsApp() {
             "WhatsApp account:",
             newSocket.user?.id || "Connected"
           );
+
+          // EXPLICIT ONLINE PRESENCE
+
+          if (ONLINE_PRESENCE_ENABLED) {
+            try {
+              await newSocket.sendPresenceUpdate("available");
+
+              console.log(
+                `${ROBOT_NAME} online presence announced successfully.`
+              );
+
+            } catch (presenceError) {
+              console.error(
+                "ONLINE PRESENCE ERROR:",
+                presenceError.message
+              );
+            }
+          }
         }
 
-        // ----------------------------------
         // DISCONNECTED
-        // ----------------------------------
 
         if (connection === "close") {
           starting = false;
@@ -1266,8 +1863,7 @@ export async function startWhatsApp() {
             return;
           }
 
-          // Keep the pending number so that a new
-          // socket can retry after reconnection.
+          // Preserve the pending number for a retry.
 
           if (pendingPairingNumber) {
             pairingRequested = false;
@@ -1297,9 +1893,7 @@ export async function startWhatsApp() {
       }
     );
 
-    // --------------------------------------
     // INCOMING MESSAGES
-    // --------------------------------------
 
     newSocket.ev.on(
       "messages.upsert",
@@ -1369,6 +1963,20 @@ export async function stopWhatsApp() {
   }
 
   const activeSocket = sock;
+
+  // Announce unavailable before shutting down.
+
+  if (activeSocket && activeSocket.user) {
+    try {
+      await activeSocket.sendPresenceUpdate("unavailable");
+
+    } catch (presenceError) {
+      console.error(
+        "OFFLINE PRESENCE ERROR:",
+        presenceError.message
+      );
+    }
+  }
 
   sock = null;
 
