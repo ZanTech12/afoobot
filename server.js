@@ -18,21 +18,17 @@ const app = express();
 // ==========================================
 
 const PORT = process.env.PORT || 3000;
-
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN;
 const BOT_API_SECRET = process.env.BOT_API_SECRET;
 
 const MAX_PDF_SIZE = 7 * 1024 * 1024;
-
 const SERVER_STARTED_AT = new Date().toISOString();
 
 app.disable("x-powered-by");
 
-app.use(
-  express.json({
-    limit: "12mb"
-  })
-);
+app.use(express.json({
+  limit: "12mb"
+}));
 
 // ==========================================
 // ADMIN AUTHENTICATION
@@ -55,16 +51,16 @@ function adminAuth(req, res, next) {
 }
 
 // ==========================================
-// BOT API AUTHENTICATION
+// INTERNAL BOT SERVICE AUTHENTICATION
 // ==========================================
 
-function botApiAuth(req, res, next) {
-  const token = req.headers["x-bot-secret"];
+function botServiceAuth(req, res, next) {
+  const secret = req.headers["x-bot-secret"];
 
-  if (!BOT_API_SECRET || token !== BOT_API_SECRET) {
+  if (!BOT_API_SECRET || secret !== BOT_API_SECRET) {
     return res.status(401).json({
       success: false,
-      message: "Invalid bot API secret."
+      message: "Unauthorized bot service request."
     });
   }
 
@@ -92,8 +88,7 @@ app.get("/", (_req, res) => {
     service: "Afoo Technology WhatsApp Bot",
     message: "WhatsApp Bot API is running.",
     admin: "/admin",
-    health: "/health",
-    whatsapp: getWhatsAppStatus().status
+    health: "/health"
   });
 });
 
@@ -120,6 +115,198 @@ app.get("/health", (_req, res) => {
 });
 
 // ==========================================
+// INTERNAL WHATSAPP OTP ENDPOINT
+// ==========================================
+
+app.post(
+  "/internal/send-otp",
+  botServiceAuth,
+  async (req, res) => {
+    try {
+      const { phone, otp, name } = req.body || {};
+
+      if (!phone || !otp) {
+        return res.status(400).json({
+          success: false,
+          message: "Phone number and OTP are required."
+        });
+      }
+
+      if (!/^\d{6}$/.test(String(otp))) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid OTP format."
+        });
+      }
+
+      if (!isValidPhone(phone)) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid phone number."
+        });
+      }
+
+      if (name !== undefined && typeof name !== "string") {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid customer name."
+        });
+      }
+
+      await sendWhatsAppOTP(
+        phone,
+        otp,
+        name || "Customer"
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: "WhatsApp OTP sent successfully."
+      });
+
+    } catch (error) {
+      console.error(
+        "WHATSAPP OTP DELIVERY ERROR:",
+        error.message
+      );
+
+      return res.status(503).json({
+        success: false,
+        message: "WhatsApp OTP delivery failed."
+      });
+    }
+  }
+);
+
+// ==========================================
+// INTERNAL ORDER / PAYMENT NOTIFICATION
+// ==========================================
+
+app.post(
+  "/internal/send-notification",
+  botServiceAuth,
+  async (req, res) => {
+    try {
+      const {
+        phone,
+        message,
+        pdfBase64,
+        fileName
+      } = req.body || {};
+
+      if (!isValidPhone(phone)) {
+        return res.status(400).json({
+          success: false,
+          message: "A valid customer phone number is required."
+        });
+      }
+
+      if (
+        typeof message !== "string" ||
+        !message.trim() ||
+        message.length > 10000
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "A valid notification message is required."
+        });
+      }
+
+      let pdfBuffer = null;
+
+      // ======================================
+      // OPTIONAL PDF VALIDATION
+      // ======================================
+
+      if (pdfBase64 !== undefined && pdfBase64 !== null) {
+        if (
+          typeof pdfBase64 !== "string" ||
+          !pdfBase64.trim()
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid PDF receipt data."
+          });
+        }
+
+        const estimatedSize = Math.floor(
+          pdfBase64.length * 0.75
+        );
+
+        if (estimatedSize > MAX_PDF_SIZE) {
+          return res.status(413).json({
+            success: false,
+            message: "PDF receipt exceeds the 7MB limit."
+          });
+        }
+
+        pdfBuffer = Buffer.from(pdfBase64, "base64");
+
+        if (
+          !pdfBuffer.length ||
+          pdfBuffer.length > MAX_PDF_SIZE
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: "Invalid or oversized PDF receipt."
+          });
+        }
+
+        if (
+          pdfBuffer.subarray(0, 5).toString() !== "%PDF-"
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: "The supplied document is not a valid PDF."
+          });
+        }
+      }
+
+      // ======================================
+      // SAFE FILE NAME
+      // ======================================
+
+      const safeFileName =
+        typeof fileName === "string" && fileName.trim()
+          ? fileName
+              .replace(/[^a-zA-Z0-9._-]/g, "_")
+              .slice(0, 100)
+          : "Afoo-Technology-Receipt.pdf";
+
+      // ======================================
+      // SEND NOTIFICATION
+      // ======================================
+
+      await sendWhatsAppNotification(
+        phone,
+        message.trim(),
+        pdfBuffer,
+        safeFileName
+      );
+
+      return res.status(200).json({
+        success: true,
+        message: pdfBuffer
+          ? "WhatsApp notification and PDF receipt sent successfully."
+          : "WhatsApp notification sent successfully.",
+        receiptSent: Boolean(pdfBuffer)
+      });
+
+    } catch (error) {
+      console.error(
+        "WHATSAPP NOTIFICATION ERROR:",
+        error.message
+      );
+
+      return res.status(503).json({
+        success: false,
+        message: "WhatsApp notification delivery failed."
+      });
+    }
+  }
+);
+
+// ==========================================
 // ADMIN DASHBOARD
 // ==========================================
 
@@ -137,7 +324,7 @@ app.get("/admin", (_req, res) => {
     content="width=device-width, initial-scale=1"
   >
 
-  <title>Afoo Technology | WhatsApp Admin</title>
+  <title>Afoo Technology WhatsApp Admin</title>
 
   <style>
     * {
@@ -145,150 +332,96 @@ app.get("/admin", (_req, res) => {
     }
 
     body {
-      margin: 0;
-      padding: 20px;
       font-family: Arial, sans-serif;
-      background: #f3f6f8;
-      color: #17202a;
+      background: #f4f6f8;
+      padding: 20px;
+      margin: 0;
+      color: #222;
     }
 
     .container {
-      max-width: 550px;
-      margin: 35px auto;
+      max-width: 480px;
+      margin: 30px auto;
       background: white;
       padding: 25px;
-      border-radius: 15px;
-      box-shadow: 0 5px 25px #00000012;
-    }
-
-    .header {
-      text-align: center;
-      margin-bottom: 25px;
-    }
-
-    .logo {
-      width: 65px;
-      height: 65px;
-      background: #075e45;
-      color: white;
-      border-radius: 18px;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      font-size: 27px;
-      font-weight: bold;
-      margin: auto auto 12px;
+      border-radius: 12px;
+      box-shadow: 0 4px 20px #0001;
     }
 
     h2 {
-      margin: 5px 0;
-      color: #075e45;
+      color: #087b45;
+      text-align: center;
     }
 
-    h3 {
-      margin-top: 25px;
-      font-size: 17px;
-    }
-
-    .subtitle {
-      color: #777;
-      font-size: 13px;
-    }
-
-    label {
-      display: block;
-      font-weight: bold;
-      font-size: 13px;
-      margin-top: 15px;
-    }
-
-    input {
+    input, button {
+      box-sizing: border-box;
       width: 100%;
-      padding: 14px;
-      margin-top: 8px;
-      border: 1px solid #ddd;
-      border-radius: 8px;
+      padding: 13px;
+      margin: 8px 0;
+      border-radius: 7px;
+      border: 1px solid #ccc;
       font-size: 15px;
-      outline: none;
-    }
-
-    input:focus {
-      border-color: #087b50;
     }
 
     button {
-      width: 100%;
-      border: none;
-      padding: 14px;
-      border-radius: 8px;
-      margin-top: 12px;
-      background: #087b50;
+      background: #087b45;
       color: white;
-      font-size: 14px;
-      font-weight: bold;
+      border: 0;
       cursor: pointer;
-    }
-
-    button:disabled {
-      opacity: 0.6;
-      cursor: not-allowed;
     }
 
     button.secondary {
       background: #185abd;
     }
 
-    button.danger {
-      background: #b42318;
+    button:disabled {
+      opacity: .6;
+      cursor: not-allowed;
+    }
+
+    #qr {
+      width: 280px;
+      max-width: 100%;
+      display: none;
+      margin: 20px auto;
     }
 
     .status {
-      background: #f2f5f6;
-      padding: 15px;
-      border-radius: 8px;
-      margin-top: 15px;
-      font-size: 14px;
-      line-height: 1.7;
+      padding: 12px;
+      background: #f0f4f6;
+      border-radius: 7px;
+      margin: 15px 0;
       overflow-wrap: anywhere;
+      line-height: 1.6;
+    }
+
+    .hint {
+      color: #666;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .pair-code {
+      text-align: center;
+      font-size: 27px;
+      font-weight: bold;
+      letter-spacing: 5px;
+      color: #087b45;
+      padding: 15px;
     }
 
     .connected {
-      color: #087b50;
+      color: #087b45;
       font-weight: bold;
     }
 
     .disconnected {
-      color: #b42318;
+      color: #c62828;
       font-weight: bold;
     }
 
-    .pair-code {
-      font-size: 27px;
-      font-weight: bold;
-      letter-spacing: 5px;
-      text-align: center;
-      color: #087b50;
-      padding: 15px;
-    }
-
-    #qr {
-      display: none;
-      width: 260px;
-      max-width: 100%;
-      margin: 20px auto;
-      border: 1px solid #eee;
-      padding: 10px;
-      border-radius: 10px;
-    }
-
-    .hint {
-      font-size: 12px;
-      line-height: 1.6;
-      color: #777;
-    }
-
-    .divider {
-      border: none;
+    hr {
+      border: 0;
       border-top: 1px solid #eee;
       margin: 25px 0;
     }
@@ -299,172 +432,125 @@ app.get("/admin", (_req, res) => {
       font-size: 12px;
       margin-top: 25px;
     }
-
-    @media(max-width: 480px) {
-      body {
-        padding: 10px;
-      }
-
-      .container {
-        margin: 10px auto;
-        padding: 20px;
-      }
-    }
   </style>
-
 </head>
 
 <body>
 
-<div class="container">
-
-  <div class="header">
-
-    <div class="logo">A</div>
+  <div class="container">
 
     <h2>Afoo Technology</h2>
+    <h3>WhatsApp Administration</h3>
 
-    <div class="subtitle">
-      WhatsApp Bot Administration Panel
+    <label>Admin token</label>
+
+    <input
+      id="token"
+      type="password"
+      placeholder="Enter your Render ADMIN_TOKEN"
+      autocomplete="off"
+    >
+
+    <button
+      class="secondary"
+      id="connectBtn"
+      onclick="checkStatus()"
+    >
+      Authenticate & Check Status
+    </button>
+
+    <div id="status" class="status">
+      Enter your admin token to continue.
+    </div>
+
+    <hr>
+
+    <h3>Option 1: Pair using phone number</h3>
+
+    <input
+      id="phone"
+      type="tel"
+      placeholder="2348012345678"
+    >
+
+    <button
+      id="pairBtn"
+      onclick="pairWhatsApp()"
+    >
+      Generate Pairing Code
+    </button>
+
+    <div id="pairResult" class="status">
+      Your pairing code will appear here.
+    </div>
+
+    <p class="hint">
+      Enter your number with country code, digits only.
+      For Nigeria, use 234 followed by your phone number.
+    </p>
+
+    <hr>
+
+    <h3>Option 2: Connect with QR code</h3>
+
+    <button
+      class="secondary"
+      id="qrBtn"
+      onclick="loadQR()"
+    >
+      Generate / Display QR Code
+    </button>
+
+    <div style="text-align:center">
+      <img id="qr" alt="WhatsApp QR code">
+    </div>
+
+    <p class="hint">
+      Open WhatsApp Business, go to Linked Devices,
+      select Link a Device and scan the QR code.
+    </p>
+
+    <hr>
+
+    <button
+      class="secondary"
+      onclick="logoutDashboard()"
+    >
+      Clear Admin Session
+    </button>
+
+    <div class="footer">
+      Afoo Technology WhatsApp Automation System
     </div>
 
   </div>
 
-  <!-- ADMIN LOGIN -->
-
-  <h3>Administrator Authentication</h3>
-
-  <label>Admin Access Token</label>
-
-  <input
-    id="token"
-    type="password"
-    placeholder="Enter your ADMIN_TOKEN"
-    autocomplete="off"
-  >
-
-  <button
-    class="secondary"
-    id="connectBtn"
-    onclick="checkStatus()"
-  >
-    Authenticate & Connect
-  </button>
-
-  <div id="status" class="status">
-    Enter your admin token to access bot controls.
-  </div>
-
-  <hr class="divider">
-
-  <!-- WHATSAPP PAIRING -->
-
-  <h3>Connect WhatsApp Using Phone Number</h3>
-
-  <label>WhatsApp Phone Number</label>
-
-  <input
-    id="phone"
-    type="tel"
-    placeholder="2348012345678"
-  >
-
-  <button
-    id="pairBtn"
-    onclick="pairWhatsApp()"
-  >
-    Generate Pairing Code
-  </button>
-
-  <div id="pairResult" class="status">
-    Your WhatsApp pairing code will appear here.
-  </div>
-
-  <p class="hint">
-    Enter your number with country code.
-    For Nigeria, use 234 followed by your phone number.
-    Do not include spaces.
-  </p>
-
-  <hr class="divider">
-
-  <!-- QR CODE -->
-
-  <h3>Connect WhatsApp Using QR Code</h3>
-
-  <button
-    class="secondary"
-    onclick="loadQR()"
-  >
-    Display WhatsApp QR Code
-  </button>
-
-  <div style="text-align:center">
-
-    <img
-      id="qr"
-      alt="WhatsApp QR Code"
-    >
-
-  </div>
-
-  <p class="hint">
-    Open WhatsApp Business on your phone.
-    Go to Linked Devices, select Link a Device
-    and scan the displayed QR code.
-  </p>
-
-  <hr class="divider">
-
-  <button
-    class="danger"
-    onclick="logoutDashboard()"
-  >
-    Clear Admin Session
-  </button>
-
-  <div class="footer">
-    Afoo Technology WhatsApp Automation System
-  </div>
-
-</div>
-
 <script>
 
-// ==========================================
-// DASHBOARD VARIABLES
-// ==========================================
-
 const tokenInput = document.getElementById("token");
-
 const statusBox = document.getElementById("status");
-
 const pairResult = document.getElementById("pairResult");
 
-let refreshInterval = null;
-
 let isAuthenticated = false;
+let refreshInterval = null;
 
 // ==========================================
 // API REQUEST
 // ==========================================
 
 async function api(path, options = {}) {
-
   const token = tokenInput.value.trim();
 
   if (!token) {
-    throw new Error("Please enter your admin token.");
+    throw new Error("Enter your admin token first.");
   }
 
   const response = await fetch(path, {
     ...options,
-
+    cache: "no-store",
     headers: {
       "Content-Type": "application/json",
-
       "Authorization": "Bearer " + token,
-
       ...(options.headers || {})
     }
   });
@@ -472,14 +558,7 @@ async function api(path, options = {}) {
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-
-    if (response.status === 401) {
-      isAuthenticated = false;
-    }
-
-    throw new Error(
-      data.message || "Request failed."
-    );
+    throw new Error(data.message || "Request failed.");
   }
 
   return data;
@@ -490,7 +569,6 @@ async function api(path, options = {}) {
 // ==========================================
 
 function escapeHTML(value) {
-
   return String(value).replace(/[&<>"']/g, char => ({
     "&": "&amp;",
     "<": "&lt;",
@@ -498,7 +576,6 @@ function escapeHTML(value) {
     '"': "&quot;",
     "'": "&#39;"
   })[char]);
-
 }
 
 // ==========================================
@@ -506,80 +583,57 @@ function escapeHTML(value) {
 // ==========================================
 
 async function checkStatus() {
-
   const button = document.getElementById("connectBtn");
 
   button.disabled = true;
 
-  statusBox.innerText = "Checking WhatsApp connection...";
-
   try {
-
     const data = await api("/admin/status");
 
     isAuthenticated = true;
 
-    const whatsappStatus = String(
-      data.status || "unknown"
-    );
-
     const connected =
-      whatsappStatus.toLowerCase() === "connected";
-
-    // Build status HTML without nested template literals.
+      data.status === "connected";
 
     statusBox.innerHTML =
-      "<strong>Server Authentication:</strong> " +
-      '<span class="connected">Successful</span>' +
-      "<br>" +
-
-      "<strong>WhatsApp Status:</strong> " +
-
+      "<strong>Authentication:</strong> " +
+      '<span class="connected">Successful</span><br>' +
+      "<strong>WhatsApp:</strong> " +
       '<span class="' +
       (connected ? "connected" : "disconnected") +
       '">' +
-
-      escapeHTML(whatsappStatus) +
-
-      "</span>" +
-
+      escapeHTML(data.status) +
+      "</span><br>" +
+      "<strong>QR Available:</strong> " +
+      escapeHTML(String(data.qrAvailable)) +
       "<br>" +
-
       "<strong>Last Checked:</strong> " +
       escapeHTML(new Date().toLocaleTimeString());
 
     if (data.pairingCode) {
-
       pairResult.innerHTML =
-        "Pairing Code:" +
-        "<div class='pair-code'>" +
+        "Pairing code:" +
+        '<div class="pair-code">' +
         escapeHTML(data.pairingCode) +
         "</div>";
-
     }
 
     startAutoRefresh();
 
   } catch (error) {
-
     isAuthenticated = false;
-
     statusBox.innerText = error.message;
 
   } finally {
-
     button.disabled = false;
-
   }
-
 }
 
 // ==========================================
-// WHATSAPP PAIRING
+// PAIR WITH PHONE NUMBER
 // ==========================================
 
 async function pairWhatsApp() {
-
   const phone = document
     .getElementById("phone")
     .value
@@ -587,178 +641,155 @@ async function pairWhatsApp() {
 
   const button = document.getElementById("pairBtn");
 
-  if (!phone) {
-
-    pairResult.innerText =
-      "Enter your WhatsApp phone number.";
-
-    return;
-
-  }
-
-  if (!/^\+?\d{10,15}$/.test(phone)) {
-
+  if (!/^\\+?\\d{10,15}$/.test(phone)) {
     pairResult.innerText =
       "Enter a valid international phone number.";
-
     return;
-
   }
 
   button.disabled = true;
 
   pairResult.innerText =
-    "Requesting WhatsApp pairing code...";
+    "Requesting pairing code...";
 
   try {
-
     const data = await api("/admin/pair", {
-
       method: "POST",
-
       body: JSON.stringify({
         phoneNumber: phone
       })
-
     });
 
-    pairResult.innerText =
-      data.message || "Pairing request submitted.";
+    pairResult.innerText = data.message || "Pairing request submitted.";
 
     if (data.pairingCode) {
-
       pairResult.innerHTML =
-        "Your WhatsApp Pairing Code:" +
-        "<div class='pair-code'>" +
+        "Your pairing code:" +
+        '<div class="pair-code">' +
         escapeHTML(data.pairingCode) +
         "</div>";
-
     }
 
     setTimeout(checkStatus, 3000);
 
-    setTimeout(checkStatus, 8000);
-
   } catch (error) {
-
     pairResult.innerText = error.message;
 
   } finally {
-
     button.disabled = false;
-
   }
-
 }
 
 // ==========================================
-// DISPLAY QR CODE
+// LOAD WHATSAPP QR CODE
 // ==========================================
 
 async function loadQR() {
+  const img = document.getElementById("qr");
+  const button = document.getElementById("qrBtn");
 
-  const qrImage = document.getElementById("qr");
+  button.disabled = true;
+  img.style.display = "none";
 
   statusBox.innerText =
-    "Loading WhatsApp QR code...";
+    "Waiting for WhatsApp to generate a QR code...";
 
   try {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const response = await fetch("/admin/qr", {
+        cache: "no-store",
+        headers: {
+          "Authorization": "Bearer " + tokenInput.value.trim()
+        }
+      });
 
-    const data = await api("/admin/qr");
+      const data = await response.json().catch(() => ({}));
 
-    if (!data.success || !data.qr) {
+      if (response.status === 401) {
+        throw new Error("Unauthorized. Check your admin token.");
+      }
 
-      qrImage.style.display = "none";
+      if (data.success && data.qr) {
+        img.onload = () => {
+          img.style.display = "block";
+          statusBox.innerText =
+            "QR code is ready. Scan it with WhatsApp.";
+        };
 
-      throw new Error(
-        data.message || "WhatsApp QR code is not ready."
+        img.onerror = () => {
+          statusBox.innerText =
+            "QR image could not be displayed.";
+        };
+
+        img.src = data.qr;
+
+        return;
+      }
+
+      if (data.status === "connected") {
+        throw new Error(
+          "WhatsApp is already connected. No QR code is required."
+        );
+      }
+
+      statusBox.innerText =
+        "Waiting for QR code... (" +
+        (attempt + 1) +
+        "/20)";
+
+      await new Promise(resolve =>
+        setTimeout(resolve, 2000)
       );
-
     }
 
-    qrImage.src = data.qr;
-
-    qrImage.style.display = "block";
-
-    statusBox.innerText =
-      "QR code loaded successfully.";
+    throw new Error(
+      "QR code was not generated after 40 seconds. Check the server logs and WhatsApp connection status."
+    );
 
   } catch (error) {
-
     statusBox.innerText = error.message;
 
+  } finally {
+    button.disabled = false;
   }
-
 }
 
 // ==========================================
-// AUTOMATIC STATUS REFRESH
+// AUTO REFRESH
 // ==========================================
 
 function startAutoRefresh() {
-
   if (refreshInterval) {
-
     clearInterval(refreshInterval);
-
   }
 
   refreshInterval = setInterval(() => {
-
-    if (
-      isAuthenticated &&
-      tokenInput.value.trim()
-    ) {
-
+    if (isAuthenticated && tokenInput.value.trim()) {
       checkStatus();
-
     }
-
   }, 15000);
-
 }
 
 // ==========================================
-// CLEAR ADMIN SESSION
+// CLEAR SESSION
 // ==========================================
 
 function logoutDashboard() {
-
   tokenInput.value = "";
-
   isAuthenticated = false;
 
   if (refreshInterval) {
-
     clearInterval(refreshInterval);
-
     refreshInterval = null;
-
   }
 
   document.getElementById("qr").style.display = "none";
 
-  statusBox.innerText =
-    "Admin session cleared.";
+  statusBox.innerText = "Admin session cleared.";
 
   pairResult.innerText =
     "Your pairing code will appear here.";
-
 }
-
-// ==========================================
-// ENTER KEY LOGIN
-// ==========================================
-
-tokenInput.addEventListener("keydown", event => {
-
-  if (event.key === "Enter") {
-
-    checkStatus();
-
-  }
-
-});
 
 </script>
 
@@ -767,415 +798,118 @@ tokenInput.addEventListener("keydown", event => {
 });
 
 // ==========================================
-// ADMIN STATUS API
+// ADMIN STATUS
 // ==========================================
 
-app.get(
-  "/admin/status",
-  adminAuth,
-  (_req, res) => {
+app.get("/admin/status", adminAuth, (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
 
-    res.json({
-      success: true,
-      ...getWhatsAppStatus()
+  res.json({
+    success: true,
+    ...getWhatsAppStatus()
+  });
+});
+
+// ==========================================
+// ADMIN QR CODE
+// ==========================================
+
+app.get("/admin/qr", adminAuth, (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+
+  const qr = getCurrentQR();
+
+  if (!qr) {
+    const status = getWhatsAppStatus();
+
+    return res.status(404).json({
+      success: false,
+      message: status.status === "connected"
+        ? "WhatsApp is already connected."
+        : "QR code is not ready yet.",
+      status: status.status,
+      qrAvailable: false,
+      error: status.qrGenerationError || null
     });
-
   }
-);
+
+  return res.json({
+    success: true,
+    qr,
+    message: "WhatsApp QR code is ready."
+  });
+});
 
 // ==========================================
-// ADMIN QR CODE API
+// ADMIN PAIRING
 // ==========================================
 
-app.get(
-  "/admin/qr",
-  adminAuth,
-  (_req, res) => {
+app.post("/admin/pair", adminAuth, async (req, res) => {
+  try {
+    const { phoneNumber } = req.body || {};
 
-    const qr = getCurrentQR();
-
-    if (!qr) {
-
-      return res.status(404).json({
-        success: false,
-        message: "QR code is not currently available."
-      });
-
-    }
-
-    res.json({
-      success: true,
-      qr
-    });
-
-  }
-);
-
-// ==========================================
-// ADMIN PAIRING API
-// ==========================================
-
-app.post(
-  "/admin/pair",
-  adminAuth,
-  async (req, res) => {
-
-    try {
-
-      const { phoneNumber } = req.body || {};
-
-      if (!isValidPhone(phoneNumber)) {
-
-        return res.status(400).json({
-          success: false,
-          message: "A valid international phone number is required."
-        });
-
-      }
-
-      const result = await requestPairing(
-        phoneNumber.trim()
-      );
-
-      return res.json({
-        success: true,
-        ...result
-      });
-
-    } catch (error) {
-
-      console.error(
-        "WHATSAPP PAIRING ERROR:",
-        error.message
-      );
-
+    if (!isValidPhone(phoneNumber)) {
       return res.status(400).json({
         success: false,
-        message: error.message
+        message: "Enter a valid international phone number."
       });
-
     }
 
+    const result = await requestPairing(phoneNumber);
+
+    return res.json(result);
+
+  } catch (error) {
+    console.error("PAIRING ERROR:", error.message);
+
+    return res.status(400).json({
+      success: false,
+      message: error.message
+    });
   }
-);
-
+});
 // ==========================================
-// SEND WHATSAPP OTP
-// ==========================================
-
-app.post(
-  "/api/whatsapp/otp",
-  botApiAuth,
-  async (req, res) => {
-
-    try {
-
-      const {
-        phone,
-        otp,
-        name
-      } = req.body || {};
-
-      if (!phone || !otp) {
-
-        return res.status(400).json({
-          success: false,
-          message: "Phone number and OTP are required."
-        });
-
-      }
-
-      if (!isValidPhone(phone)) {
-
-        return res.status(400).json({
-          success: false,
-          message: "Invalid phone number."
-        });
-
-      }
-
-      if (!/^\d{6}$/.test(String(otp))) {
-
-        return res.status(400).json({
-          success: false,
-          message: "Invalid OTP format."
-        });
-
-      }
-
-      if (
-        name !== undefined &&
-        typeof name !== "string"
-      ) {
-
-        return res.status(400).json({
-          success: false,
-          message: "Invalid customer name."
-        });
-
-      }
-
-      await sendWhatsAppOTP(
-        phone,
-        otp,
-        name || "Customer"
-      );
-
-      return res.status(200).json({
-        success: true,
-        message: "WhatsApp OTP sent successfully."
-      });
-
-    } catch (error) {
-
-      console.error(
-        "WHATSAPP OTP DELIVERY ERROR:",
-        error.message
-      );
-
-      return res.status(503).json({
-        success: false,
-        message: "WhatsApp OTP delivery failed."
-      });
-
-    }
-
-  }
-);
-
-// ==========================================
-// SEND WHATSAPP NOTIFICATION
-// ==========================================
-
-app.post(
-  "/api/whatsapp/notification",
-  botApiAuth,
-  async (req, res) => {
-
-    try {
-
-      const {
-        phone,
-        message,
-        pdfBase64,
-        fileName
-      } = req.body || {};
-
-      // Validate phone number.
-
-      if (!isValidPhone(phone)) {
-
-        return res.status(400).json({
-          success: false,
-          message: "A valid customer phone number is required."
-        });
-
-      }
-
-      // Validate message.
-
-      if (
-        typeof message !== "string" ||
-        !message.trim() ||
-        message.length > 10000
-      ) {
-
-        return res.status(400).json({
-          success: false,
-          message: "A valid notification message is required."
-        });
-
-      }
-
-      let pdfBuffer = null;
-
-      // ======================================
-      // OPTIONAL PDF VALIDATION
-      // ======================================
-
-      if (
-        pdfBase64 !== undefined &&
-        pdfBase64 !== null
-      ) {
-
-        if (
-          typeof pdfBase64 !== "string" ||
-          !pdfBase64.trim()
-        ) {
-
-          return res.status(400).json({
-            success: false,
-            message: "Invalid PDF receipt data."
-          });
-
-        }
-
-        // Estimate decoded Base64 size.
-
-        const estimatedSize = Math.floor(
-          pdfBase64.length * 0.75
-        );
-
-        if (estimatedSize > MAX_PDF_SIZE) {
-
-          return res.status(413).json({
-            success: false,
-            message: "PDF receipt exceeds the 7MB limit."
-          });
-
-        }
-
-        // Decode Base64.
-
-        pdfBuffer = Buffer.from(
-          pdfBase64,
-          "base64"
-        );
-
-        // Validate actual decoded size.
-
-        if (
-          !pdfBuffer.length ||
-          pdfBuffer.length > MAX_PDF_SIZE
-        ) {
-
-          return res.status(400).json({
-            success: false,
-            message: "Invalid or oversized PDF receipt."
-          });
-
-        }
-
-        // Validate PDF signature.
-
-        if (
-          pdfBuffer.subarray(0, 5).toString() !== "%PDF-"
-        ) {
-
-          return res.status(400).json({
-            success: false,
-            message: "The supplied document is not a valid PDF."
-          });
-
-        }
-
-      }
-
-      // ======================================
-      // SAFE FILE NAME
-      // ======================================
-
-      const safeFileName =
-        typeof fileName === "string" && fileName.trim()
-          ? fileName
-              .replace(/[^a-zA-Z0-9._-]/g, "_")
-              .slice(0, 100)
-          : "Afoo-Technology-Receipt.pdf";
-
-      // ======================================
-      // SEND WHATSAPP NOTIFICATION
-      // ======================================
-
-      await sendWhatsAppNotification(
-        phone,
-        message.trim(),
-        pdfBuffer,
-        safeFileName
-      );
-
-      return res.status(200).json({
-        success: true,
-
-        message: pdfBuffer
-          ? "WhatsApp notification and PDF receipt sent successfully."
-          : "WhatsApp notification sent successfully.",
-
-        receiptSent: Boolean(pdfBuffer)
-      });
-
-    } catch (error) {
-
-      console.error(
-        "WHATSAPP NOTIFICATION ERROR:",
-        error.message
-      );
-
-      return res.status(503).json({
-        success: false,
-        message: "WhatsApp notification delivery failed."
-      });
-
-    }
-
-  }
-);
-
-// ==========================================
-// 404 HANDLER
+// 404
 // ==========================================
 
 app.use((req, res) => {
-
   res.status(404).json({
     success: false,
     message: "Endpoint not found.",
     path: req.originalUrl
   });
-
 });
 
 // ==========================================
-// GLOBAL ERROR HANDLER
+// ERROR HANDLER
 // ==========================================
 
 app.use((error, _req, res, _next) => {
-
-  console.error(
-    "SERVER ERROR:",
-    error
-  );
+  console.error("SERVER ERROR:", error);
 
   res.status(500).json({
     success: false,
     message: "Internal server error."
   });
-
 });
 
 // ==========================================
-// START SERVER
+// START SERVER AND WHATSAPP
 // ==========================================
 
-const server = app.listen(
-  PORT,
-  "0.0.0.0",
-  () => {
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log("----------------------------------");
+  console.log("AFOO TECHNOLOGY WHATSAPP BOT");
+  console.log("----------------------------------");
+  console.log(`Port: ${PORT}`);
+  console.log("Admin Dashboard: /admin");
+  console.log("Health Check: /health");
+  console.log("----------------------------------");
 
-    console.log("----------------------------------");
-
-    console.log("AFOO TECHNOLOGY WHATSAPP BOT");
-
-    console.log("----------------------------------");
-
-    console.log(`Port: ${PORT}`);
-
-    console.log("Admin Dashboard: /admin");
-
-    console.log("Health Check: /health");
-
-    console.log("----------------------------------");
-
-    startWhatsApp().catch(error => {
-
-      console.error(
-        "WHATSAPP STARTUP ERROR:",
-        error.message
-      );
-
-    });
-
-  }
-);
+  startWhatsApp().catch(error => {
+    console.error("WHATSAPP STARTUP ERROR:", error);
+  });
+});
 
 // ==========================================
 // GRACEFUL SHUTDOWN
@@ -1184,39 +918,22 @@ const server = app.listen(
 let shuttingDown = false;
 
 function shutdown(signal) {
-
   if (shuttingDown) return;
 
   shuttingDown = true;
 
-  console.log(
-    `${signal} received. Shutting down server...`
-  );
+  console.log(`${signal} received. Shutting down server...`);
 
   server.close(() => {
-
     console.log("Express server closed.");
-
     process.exit(0);
-
   });
 
   setTimeout(() => {
-
     console.error("Forced shutdown.");
-
     process.exit(1);
-
   }, 10000).unref();
-
 }
 
-process.on(
-  "SIGTERM",
-  () => shutdown("SIGTERM")
-);
-
-process.on(
-  "SIGINT",
-  () => shutdown("SIGINT")
-);
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));

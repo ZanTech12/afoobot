@@ -1,16 +1,22 @@
+
 import "dotenv/config";
 
 import makeWASocket, {
   DisconnectReason,
   useMultiFileAuthState
 } from "@whiskeysockets/baileys";
+
 import { Boom } from "@hapi/boom";
 import P from "pino";
-import QRCode from "qrcode";
 import fs from "fs";
 import path from "path";
 
-const STORE_NAME = process.env.STORE_NAME || "Afoo Technology";
+// ==========================================
+// CONFIGURATION
+// ==========================================
+
+const STORE_NAME =
+  process.env.STORE_NAME || "Afoo Technology";
 
 const TEXT_ONLY_MODE =
   (process.env.TEXT_ONLY_MODE || "true").toLowerCase() === "true";
@@ -27,42 +33,80 @@ Our API key has already been connected to the Lumi platform. However, the integr
 We appreciate your patience. Our team will be glad to assist you with your phone accessories and replacement-parts enquiries once the integration is complete. 🙏`;
 
 const AUTH_FOLDER =
-  process.env.AUTH_FOLDER || path.join(process.cwd(), "auth_info");
+  process.env.AUTH_FOLDER ||
+  path.join(process.cwd(), "auth_info_afoo");
+
+const LOG_LEVEL =
+  process.env.LOG_LEVEL || "info";
 
 const logger = P({
-  level: process.env.LOG_LEVEL || "silent"
+  level: LOG_LEVEL
 });
 
+// ==========================================
+// GLOBAL STATE
+// ==========================================
+
 let sock = null;
-let currentQR = null;
+let authState = null;
+
 let pairingCode = null;
 let pendingPairingNumber = null;
+
+let qrEventReady = false;
+let pairingRequested = false;
+
 let connectionStatus = "disconnected";
+let sessionRegistered = false;
+
 let starting = false;
-let reconnectTimer = null;
 let manualClose = false;
+
+let reconnectTimer = null;
+
+// Compatibility with existing Afoo admin API.
+// QR images are intentionally disabled.
+let currentQR = null;
+let qrUpdatedAt = null;
+let qrGenerationError = null;
 
 const handledMessages = new Set();
 
 // ==========================================
-// PHONE NUMBER HELPERS
+// GENERAL HELPERS
 // ==========================================
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 function normalizePhone(value) {
   return String(value || "").replace(/\D/g, "");
 }
 
 function toJid(phone) {
-  const number = normalizePhone(phone);
-  return `${number}@s.whatsapp.net`;
+  return `${normalizePhone(phone)}@s.whatsapp.net`;
 }
 
-// ==========================================
-// CONNECTION HELPERS
-// ==========================================
+function isValidPhone(phone) {
+  const number = normalizePhone(phone);
+
+  return number.length >= 10 && number.length <= 15;
+}
+
+function getDisconnectStatus(error) {
+  if (!error) return null;
+
+  if (error instanceof Boom) {
+    return error.output?.statusCode || null;
+  }
+
+  return error?.output?.statusCode || null;
+}
 
 function isConnected() {
-  return Boolean(sock?.user) && connectionStatus === "connected";
+  return Boolean(sock?.user) &&
+    connectionStatus === "connected";
 }
 
 async function sendText(jid, message) {
@@ -76,7 +120,7 @@ async function sendText(jid, message) {
 }
 
 // ==========================================
-// MESSAGE DETECTION
+// MESSAGE HELPERS
 // ==========================================
 
 function isGreeting(text) {
@@ -89,10 +133,6 @@ function isProductEnquiry(text) {
     .test(String(text || ""));
 }
 
-// ==========================================
-// CUSTOMER WELCOME MESSAGE
-// ==========================================
-
 function getWelcome() {
   return `Welcome to *${STORE_NAME}*! 👋
 
@@ -102,7 +142,7 @@ Please tell us what you need and include your phone brand and model where possib
 }
 
 // ==========================================
-// INCOMING MESSAGE HANDLER
+// INCOMING WHATSAPP MESSAGES
 // ==========================================
 
 async function handleIncomingMessage(message) {
@@ -116,12 +156,11 @@ async function handleIncomingMessage(message) {
     return;
   }
 
-  // Ignore group messages
+  // Ignore group messages.
   if (remoteJid.endsWith("@g.us")) {
     return;
   }
 
-  // Prevent duplicate message processing
   const messageId = message?.key?.id;
 
   if (messageId && handledMessages.has(messageId)) {
@@ -148,7 +187,6 @@ async function handleIncomingMessage(message) {
 
   const normalized = String(text).trim();
 
-  // Text-only handling
   if (!normalized) {
     if (TEXT_ONLY_MODE) {
       await sendText(
@@ -160,11 +198,13 @@ async function handleIncomingMessage(message) {
     return;
   }
 
-  console.log(`Message received from ${remoteJid}: ${normalized}`);
+  console.log(
+    `Message received from ${remoteJid}: ${normalized}`
+  );
 
-  // ========================================
-  // PRODUCT ENQUIRY - LUMI NOTICE
-  // ========================================
+  // ----------------------------------------
+  // LUMI PRODUCT NOTICE
+  // ----------------------------------------
 
   if (
     AFOO_PRODUCT_NOTICE_MODE &&
@@ -174,18 +214,18 @@ async function handleIncomingMessage(message) {
     return;
   }
 
-  // ========================================
-  // GREETING
-  // ========================================
+  // ----------------------------------------
+  // GREETINGS
+  // ----------------------------------------
 
   if (isGreeting(normalized)) {
     await sendText(remoteJid, getWelcome());
     return;
   }
 
-  // ========================================
-  // REQUEST FOR HUMAN SUPPORT
-  // ========================================
+  // ----------------------------------------
+  // HUMAN SUPPORT REQUEST
+  // ----------------------------------------
 
   if (
     /\b(human|agent|staff|representative|customer care|support person)\b/i
@@ -199,9 +239,9 @@ async function handleIncomingMessage(message) {
     return;
   }
 
-  // ========================================
+  // ----------------------------------------
   // DEFAULT RESPONSE
-  // ========================================
+  // ----------------------------------------
 
   await sendText(
     remoteJid,
@@ -219,55 +259,206 @@ export function getWhatsAppStatus() {
   return {
     status: connectionStatus,
     storeName: STORE_NAME,
+
     textOnlyMode: TEXT_ONLY_MODE,
     afooProductNoticeMode: AFOO_PRODUCT_NOTICE_MODE,
-    qrAvailable: Boolean(currentQR),
+
+    // Phone-number pairing only.
+    qrAvailable: false,
+    qrUpdatedAt: null,
+    qrGenerationError: null,
+
     pairingCode,
-    pairingRequested: Boolean(pendingPairingNumber),
+    pairingRequested,
+
+    pairingInProgress: Boolean(
+      pendingPairingNumber && pairingRequested
+    ),
+
+    pendingPairingNumber: pendingPairingNumber
+      ? `${pendingPairingNumber.slice(0, 3)}******`
+      : null,
+
+    qrEventReady,
+
+    socketReady: Boolean(sock),
+    sessionRegistered,
+
     authFolder: AUTH_FOLDER
   };
 }
 
 export function getCurrentQR() {
-  return currentQR;
+  return null;
 }
 
 // ==========================================
-// REQUEST PAIRING CODE
+// ISSUE PHONE-NUMBER PAIRING CODE
+// ==========================================
+
+async function issuePairingCode() {
+  if (
+    !sock ||
+    !authState ||
+    !pendingPairingNumber ||
+    pairingRequested ||
+    connectionStatus === "connected"
+  ) {
+    return null;
+  }
+
+  if (authState.creds.registered) {
+    console.error(
+      "Cannot request a pairing code: an existing session is registered."
+    );
+
+    connectionStatus = "logged_out";
+    sessionRegistered = true;
+
+    return null;
+  }
+
+  if (!qrEventReady) {
+    console.log(
+      "Waiting for WhatsApp pairing event."
+    );
+
+    return null;
+  }
+
+  // Prevent duplicate requests.
+  pairingRequested = true;
+
+  try {
+    const activeSocket = sock;
+    const number = pendingPairingNumber;
+
+    console.log("----------------------------------");
+    console.log("AFOO TECHNOLOGY WHATSAPP PAIRING");
+    console.log("----------------------------------");
+    console.log("Requesting WhatsApp pairing code.");
+    console.log("Phone:", number);
+
+    // Follow Divine's working pairing delay.
+    await sleep(1500);
+
+    if (
+      !sock ||
+      sock !== activeSocket ||
+      !authState ||
+      authState.creds.registered ||
+      connectionStatus === "connected"
+    ) {
+      throw new Error(
+        "WhatsApp socket is not ready for a new pairing request."
+      );
+    }
+
+    const code = await activeSocket.requestPairingCode(number);
+
+    if (!code || !String(code).trim()) {
+      throw new Error(
+        "Baileys did not return a valid pairing code."
+      );
+    }
+
+    pairingCode = code;
+
+    currentQR = null;
+    qrUpdatedAt = null;
+    qrGenerationError = null;
+
+    connectionStatus = "pairing_code_ready";
+
+    console.log("----------------------------------");
+    console.log("PAIRING CODE GENERATED SUCCESSFULLY");
+    console.log("----------------------------------");
+    console.log("Pairing code:", code);
+    console.log("Phone:", number);
+    console.log("----------------------------------");
+
+    return code;
+
+  } catch (error) {
+    pairingRequested = false;
+    pairingCode = null;
+
+    console.error(
+      "PAIRING CODE REQUEST FAILED:",
+      error?.output?.payload ||
+      error.message ||
+      error
+    );
+
+    return null;
+  }
+}
+
+// ==========================================
+// REQUEST WHATSAPP PAIRING
 // ==========================================
 
 export async function requestPairing(phoneNumber) {
   const number = normalizePhone(phoneNumber);
 
-  if (number.length < 10 || number.length > 15) {
+  if (!isValidPhone(number)) {
     throw new Error(
-      "Enter a valid phone number with country code."
+      "Enter a valid phone number with country code, digits only."
     );
   }
 
   if (!sock) {
     throw new Error(
-      "WhatsApp socket is not initialised. Start the bot first."
+      "WhatsApp socket is not initialized. Restart the bot and try again."
     );
   }
 
-  if (isConnected()) {
-    throw new Error("WhatsApp is already connected.");
+  if (connectionStatus === "connected") {
+    throw new Error(
+      "WhatsApp is already connected."
+    );
   }
 
-  if (pendingPairingNumber) {
-    throw new Error("A pairing request is already pending.");
+  if (authState?.creds?.registered || sessionRegistered) {
+    throw new Error(
+      "The saved WhatsApp session is already registered. Back up and reset the active authentication folder before pairing again."
+    );
+  }
+
+  if (pendingPairingNumber && pairingRequested) {
+    throw new Error(
+      "A pairing-code request is already in progress. Please wait."
+    );
   }
 
   pendingPairingNumber = number;
 
-  pairingCode = await sock.requestPairingCode(number);
+  pairingCode = null;
+  pairingRequested = false;
+
+  currentQR = null;
+  qrUpdatedAt = null;
+  qrGenerationError = null;
+
+  console.log("----------------------------------");
+  console.log("AFOO TECHNOLOGY PAIRING REQUEST");
+  console.log("----------------------------------");
+  console.log("Phone:", number);
+
+  if (qrEventReady) {
+    await issuePairingCode();
+  }
 
   return {
     success: true,
-    pairingCode,
-    message:
-      "Enter this pairing code on the WhatsApp account you want to connect."
+
+    pairingCode: pairingCode || null,
+
+    phoneNumber: number,
+
+    message: pairingCode
+      ? "Pairing code generated. Open WhatsApp, select Linked Devices, choose Link with phone number instead, and enter the code."
+      : "Phone number saved. Waiting for WhatsApp connection event. Check the admin dashboard shortly."
   };
 }
 
@@ -280,8 +471,7 @@ export async function sendWhatsAppOTP(
   otp,
   name = "Customer"
 ) {
-  const message =
-    `Hello ${name},
+  const message = `Hello ${name},
 
 Your *${STORE_NAME}* verification code is: *${otp}*.
 
@@ -304,147 +494,363 @@ export async function sendWhatsAppNotification(
 
   await sendText(jid, message);
 
-  // Text-only mode intentionally suppresses outgoing files.
+  let receiptSent = false;
+
   if (pdfBuffer && !TEXT_ONLY_MODE) {
+    if (!isConnected()) {
+      throw new Error(
+        "WhatsApp disconnected before the receipt could be sent."
+      );
+    }
+
     await sock.sendMessage(jid, {
       document: Buffer.from(pdfBuffer),
       mimetype: "application/pdf",
       fileName
     });
+
+    receiptSent = true;
   }
 
   return {
-    success: true
+    success: true,
+    receiptSent
   };
 }
 
 // ==========================================
-// START WHATSAPP BOT
+// START WHATSAPP
 // ==========================================
 
 export async function startWhatsApp() {
   if (starting || isConnected()) {
+    console.log(
+      "WhatsApp startup skipped: already starting or connected."
+    );
+
     return;
   }
 
   starting = true;
   manualClose = false;
 
+  qrEventReady = false;
+
+  connectionStatus = "connecting";
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
   try {
+    // --------------------------------------
+    // AUTHENTICATION FOLDER
+    // --------------------------------------
+
     fs.mkdirSync(AUTH_FOLDER, {
       recursive: true
     });
+
+    // --------------------------------------
+    // LOAD AUTHENTICATION
+    // --------------------------------------
 
     const {
       state,
       saveCreds
     } = await useMultiFileAuthState(AUTH_FOLDER);
 
-    sock = makeWASocket({
+    authState = state;
+
+    sessionRegistered = Boolean(
+      authState.creds.registered
+    );
+
+    if (sessionRegistered) {
+      console.log(
+        "Existing WhatsApp authentication found. Attempting to reconnect."
+      );
+    } else {
+      console.log(
+        "No registered WhatsApp session found. Phone-number pairing is available."
+      );
+    }
+
+    // --------------------------------------
+    // CREATE WHATSAPP SOCKET
+    // Divine Solar Hub configuration
+    // --------------------------------------
+
+    const newSocket = makeWASocket({
       auth: state,
+
       logger,
 
       printQRInTerminal: false,
 
-      browser: [
-        STORE_NAME,
-        "Chrome",
-        "1.0.0"
-      ],
-
       markOnlineOnConnect: false,
-      syncFullHistory: false
+
+      syncFullHistory: false,
+
+      connectTimeoutMs: 60000,
+
+      defaultQueryTimeoutMs: 60000,
+
+      keepAliveIntervalMs: 15000
     });
 
-    sock.ev.on("creds.update", saveCreds);
+    sock = newSocket;
 
-    // ======================================
-    // CONNECTION UPDATE
-    // ======================================
+    console.log(
+      "WhatsApp socket created. Waiting for connection updates..."
+    );
 
-    sock.ev.on(
+    // --------------------------------------
+    // SAVE AUTHENTICATION CREDENTIALS
+    // --------------------------------------
+
+    newSocket.ev.on(
+      "creds.update",
+      async () => {
+        if (sock !== newSocket) return;
+
+        try {
+          await saveCreds();
+
+          sessionRegistered = Boolean(
+            authState?.creds?.registered
+          );
+
+          console.log(
+            "WhatsApp authentication credentials saved."
+          );
+
+        } catch (error) {
+          console.error(
+            "AUTHENTICATION SAVE ERROR:",
+            error.message
+          );
+        }
+      }
+    );
+
+    // --------------------------------------
+    // CONNECTION UPDATES
+    // --------------------------------------
+
+    newSocket.ev.on(
       "connection.update",
-      async (update) => {
+      async update => {
+        if (sock !== newSocket) {
+          return;
+        }
+
         const {
           connection,
           lastDisconnect,
           qr
         } = update;
 
+        console.log(
+          "WHATSAPP CONNECTION UPDATE:",
+          {
+            connection,
+            hasPairingEvent: Boolean(qr),
+            qrEventReady,
+            pairingCodeAvailable: Boolean(pairingCode)
+          }
+        );
+
+        // ----------------------------------
+        // PAIRING READINESS EVENT
+        // ----------------------------------
+
         if (qr) {
-          currentQR = await QRCode.toDataURL(qr);
+          // This event is used only to know that
+          // Baileys is ready for phone-number pairing.
+          //
+          // No QR image is generated.
+          // No QR code is displayed.
+          //
+          // Phone-number pairing remains the
+          // only supported linking method.
 
-          pairingCode = null;
-
-          console.log(
-            "WhatsApp QR code generated. Open the admin dashboard to scan it."
-          );
-        }
-
-        if (connection === "open") {
-          connectionStatus = "connected";
-
-          currentQR = null;
-          pairingCode = null;
-          pendingPairingNumber = null;
-
-          starting = false;
+          qrEventReady = true;
 
           console.log(
-            `${STORE_NAME} WhatsApp bot connected.`
+            "WhatsApp pairing event received. Socket is ready for phone-number pairing."
           );
-        }
 
-        if (connection === "close") {
-          connectionStatus = "disconnected";
-
-          starting = false;
-          sock = null;
-
-          const statusCode =
-            new Boom(lastDisconnect?.error)?.output?.statusCode;
-
-          const shouldReconnect =
-            !manualClose &&
-            statusCode !== DisconnectReason.loggedOut;
-
-          if (shouldReconnect && !reconnectTimer) {
-            reconnectTimer = setTimeout(() => {
-              reconnectTimer = null;
-              startWhatsApp();
-            }, 5000);
-          } else if (
-            statusCode === DisconnectReason.loggedOut
+          if (
+            pendingPairingNumber &&
+            !authState?.creds?.registered
           ) {
-            console.error(
-              "WhatsApp session logged out. Remove the auth folder and pair again."
-            );
+            await issuePairingCode();
           }
         }
 
+        // ----------------------------------
+        // CONNECTING
+        // ----------------------------------
+
         if (connection === "connecting") {
           connectionStatus = "connecting";
+
+          console.log(
+            "WhatsApp is connecting. Waiting for pairing readiness."
+          );
+        }
+
+        // ----------------------------------
+        // CONNECTED
+        // ----------------------------------
+
+        if (connection === "open") {
+          starting = false;
+
+          currentQR = null;
+          qrUpdatedAt = null;
+          qrGenerationError = null;
+
+          pairingCode = null;
+
+          pendingPairingNumber = null;
+          pairingRequested = false;
+
+          qrEventReady = false;
+
+          connectionStatus = "connected";
+
+          sessionRegistered = true;
+
+          if (reconnectTimer) {
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+          }
+
+          console.log(
+            `${STORE_NAME} WhatsApp connected successfully.`
+          );
+
+          console.log(
+            "WhatsApp account:",
+            newSocket.user?.id || "Connected"
+          );
+        }
+
+        // ----------------------------------
+        // DISCONNECTED
+        // ----------------------------------
+
+        if (connection === "close") {
+          starting = false;
+
+          const disconnectError =
+            lastDisconnect?.error;
+
+          const statusCode =
+            getDisconnectStatus(disconnectError);
+
+          const loggedOut =
+            statusCode === DisconnectReason.loggedOut;
+
+          currentQR = null;
+          qrUpdatedAt = null;
+          qrGenerationError = null;
+
+          pairingCode = null;
+          qrEventReady = false;
+
+          connectionStatus = loggedOut
+            ? "logged_out"
+            : "disconnected";
+
+          console.error(
+            "WHATSAPP DISCONNECTED:",
+            {
+              statusCode: statusCode || "unknown",
+
+              reason:
+                disconnectError?.message ||
+                "No error message",
+
+              details:
+                disconnectError?.data ||
+                disconnectError?.output?.payload ||
+                ""
+            }
+          );
+
+          if (sock === newSocket) {
+            sock = null;
+          }
+
+          if (loggedOut) {
+            sessionRegistered = false;
+
+            pendingPairingNumber = null;
+            pairingRequested = false;
+
+            console.error(
+              "WhatsApp session rejected. A new pairing is required."
+            );
+
+            console.error(
+              "Back up and reset the active authentication folder before attempting a fresh pairing."
+            );
+
+            return;
+          }
+
+          // Keep the pending number so that a new
+          // socket can retry after reconnection.
+          if (pendingPairingNumber) {
+            pairingRequested = false;
+          }
+
+          if (
+            !manualClose &&
+            !reconnectTimer
+          ) {
+            console.log(
+              "WhatsApp reconnecting in 5 seconds..."
+            );
+
+            reconnectTimer = setTimeout(() => {
+              reconnectTimer = null;
+
+              startWhatsApp().catch(error => {
+                console.error(
+                  "WHATSAPP RECONNECT ERROR:",
+                  error.message
+                );
+              });
+
+            }, 5000);
+          }
         }
       }
     );
 
-    // ======================================
-    // INCOMING WHATSAPP MESSAGES
-    // ======================================
+    // --------------------------------------
+    // INCOMING MESSAGES
+    // --------------------------------------
 
-    sock.ev.on(
+    newSocket.ev.on(
       "messages.upsert",
       async ({ messages, type }) => {
-        if (type !== "notify") {
-          return;
-        }
+        if (sock !== newSocket) return;
+
+        if (type !== "notify") return;
 
         for (const message of messages || []) {
           try {
             await handleIncomingMessage(message);
+
           } catch (error) {
             console.error(
-              "Incoming message error:",
+              "INCOMING MESSAGE ERROR:",
               error.message
             );
           }
@@ -454,20 +860,88 @@ export async function startWhatsApp() {
 
   } catch (error) {
     starting = false;
+
+    qrEventReady = false;
+
     connectionStatus = "disconnected";
 
     console.error(
-      "WhatsApp startup failed:",
+      "WHATSAPP STARTUP FAILED:",
       error
     );
 
-    if (!reconnectTimer && !manualClose) {
+    if (
+      !reconnectTimer &&
+      !manualClose
+    ) {
       reconnectTimer = setTimeout(() => {
         reconnectTimer = null;
-        startWhatsApp();
+
+        startWhatsApp().catch(reconnectError => {
+          console.error(
+            "WHATSAPP RECONNECT ERROR:",
+            reconnectError.message
+          );
+        });
+
       }, 10000);
     }
 
     throw error;
   }
+}
+
+// ==========================================
+// STOP WHATSAPP
+// ==========================================
+
+export async function stopWhatsApp() {
+  manualClose = true;
+
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  const activeSocket = sock;
+
+  sock = null;
+  authState = null;
+
+  starting = false;
+
+  connectionStatus = "disconnected";
+
+  currentQR = null;
+  qrUpdatedAt = null;
+  qrGenerationError = null;
+
+  pairingCode = null;
+  pendingPairingNumber = null;
+
+  pairingRequested = false;
+  qrEventReady = false;
+
+  if (activeSocket) {
+    try {
+      activeSocket.end(
+        new Error("WhatsApp bot stopped manually.")
+      );
+
+    } catch (error) {
+      console.error(
+        "WHATSAPP STOP ERROR:",
+        error.message
+      );
+    }
+  }
+
+  console.log(
+    `${STORE_NAME} WhatsApp bot stopped.`
+  );
+
+  return {
+    success: true,
+    status: connectionStatus
+  };
 }
